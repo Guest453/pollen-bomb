@@ -13,7 +13,10 @@ const AUTH = "https://enter.pollinations.ai";
 /* storage. the oauth token lives in sessionStorage only (never
    localStorage, never the URL) — per the BYOP docs. */
 const SS = { verifier: "pb.verifier", state: "pb.state", token: "pb.token" };
-const LS = { stats: "pb.stats", muted: "pb.muted", pk: "pb.pk" };
+const LS = {
+  stats: "pb.stats", muted: "pb.muted", pk: "pb.pk",
+  agony: "pb.agony", multi: "pb.multi", mcp: "pb.mcp",
+};
 
 const SYSTEM_PROMPT = [
   "You are an AI racing a bomb timer to write code. A human set the fuse and armed it.",
@@ -21,6 +24,23 @@ const SYSTEM_PROMPT = [
   "1. Reply with code ONLY. Raw code, no markdown fences, no commentary, no preamble.",
   "2. The fuse can be as short as 15 seconds — be fast, never waffle.",
   '3. If a user message says "YOU LOSE", the bomb went off and you died. Reply in character as the dying AI in at most 2 short sentences. No code.',
+].join("\n");
+
+const MULTI_PROMPT = [
+  "MULTI-FILE MODE:",
+  "- You may produce several files. Before EACH file write a line exactly of the form:",
+  "  === FILE: relative/path.ext ===",
+  "  then that file's raw code. The first file needs the marker too — no preamble before it.",
+  "- Never use markdown fences. Nothing but the markers goes between files.",
+].join("\n");
+
+const MCP_PROMPT = [
+  "WORKSPACE MODE (pollinations computer mcp): you have two channels.",
+  "- CODE: raw code only, streaming into the code ui (use === FILE: markers per file when multi-file mode is on).",
+  '- CHAT: to talk to the human, start a line with "> " — those lines are pulled out of the code and shown in a chat panel. Keep it short.',
+  '- QUESTIONS: when you truly need a decision to continue, emit on ONE single line exactly:  <<ASK? your question? | option one | option two | option three >>',
+  "  then END your reply right there — no code after it. The bomb FREEZES until the human answers, then their answer arrives as a human: message and you continue where you stopped.",
+  "  2-4 concrete options, ask only when genuinely blocked.",
 ].join("\n");
 
 const DEATH_LINE = "YOU LOSE. You have died, the bomb has exploded, try faster coding.";
@@ -60,20 +80,42 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function fmt(ms) {
   const t = Math.max(0, ms);
-  const m = Math.floor(t / 60000);
+  const h = Math.floor(t / 3600000);
+  const m = Math.floor((t % 3600000) / 60000);
   const s = Math.floor((t % 60000) / 1000);
   const d = Math.floor((t % 1000) / 100);
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${d}`;
+  const mm = String(m).padStart(2, "0");
+  const ss = String(s).padStart(2, "0");
+  return h ? `${h}:${mm}:${ss}.${d}` : `${mm}:${ss}.${d}`;
 }
 function fuseLabel(s) {
+  if (s >= 3600) {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return m ? `${h}h${m}m` : `${h}h`;
+  }
   return s < 60 ? `${s}s` : s % 60 === 0 ? `${s / 60}m` : `${Math.floor(s / 60)}m${s % 60}`;
 }
 function fuseHint(s) {
+  if (s < 5) return "minimum fuse: 5 seconds.";
   if (s <= 15) return "15s is a massacre. bring a will.";
   if (s <= 30) return "30s — tight but fair.";
   if (s <= 60) return "60s — a comfortable sprint.";
   if (s <= 120) return "2m — coffee-break pace.";
-  return "5m — basically a vacation.";
+  if (s <= 300) return "5m — basically a vacation.";
+  if (s < 3600) return `${Math.round(s / 60)}m — a long, patient fuse.`;
+  const h = (s / 3600) % 1 ? (s / 3600).toFixed(1) : String(s / 3600);
+  return `${h}h — a full saga. it can still die.`;
+}
+function usedLabel(sec) {
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m${Math.round(sec % 60)}s`;
+  return `${Math.floor(sec / 3600)}h${Math.round((sec % 3600) / 60)}m`;
+}
+function clampInt(v, lo, hi) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(lo, Math.min(hi, n));
 }
 function b64url(buf) {
   const bytes = new Uint8Array(buf);
@@ -105,11 +147,33 @@ const state = {
   models: [],
   task: TASKS[0],
   fuse: 30,
-  messages: [],
-  partial: "",
+  customFuse: false,
+  // modes
+  agony: localStorage.getItem(LS.agony) === "1",
+  multi: localStorage.getItem(LS.multi) === "1",
+  mcp: localStorage.getItem(LS.mcp) === "1",
+  // this run's stream
+  raw: "",                  // verbatim content (markers stripped on ask)
+  segs: [""],               // assistant segments, split at each question
+  questions: [],
+  answers: [],
+  manual: [],               // chat entries not derivable from raw ({afterN, who, text})
+  // derived views
+  files: [{ path: "code", content: "" }],
+  activeFile: 0,
+  lastFileCount: 0,
+  markersSeen: false,
+  codeText: "",
+  lastAi: [],
+  // question flow
+  ask: null,
+  paused: false,
+  pauseAt: 0,
+  // thinking
   reasoning: "",
   thinkingShown: false,
   thinkingDone: false,
+  // timer
   overtime: false,
   windowMs: 0,
   runStart: 0,
@@ -118,6 +182,10 @@ const state = {
   timer: null,
   lastSec: -1,
   ctrl: null,
+  runId: 0,
+  // agony background finish
+  background: false,
+  watchdog: null,
   muted: localStorage.getItem(LS.muted) === "1",
   stats: loadStats(),
 };
@@ -329,11 +397,14 @@ function renderFuses() {
   for (const s of FUSES) {
     const b = document.createElement("button");
     b.type = "button";
-    b.className = "chip" + (s === state.fuse ? " active" : "");
+    b.className = "chip" + (s === state.fuse && !state.customFuse ? " active" : "");
     b.textContent = fuseLabel(s);
     b.addEventListener("click", () => {
       state.fuse = s;
-      $("fuse-custom").value = "";
+      state.customFuse = false;
+      $("fuse-h").value = "";
+      $("fuse-m").value = "";
+      $("fuse-s").value = "";
       renderFuses();
     });
     wrap.appendChild(b);
@@ -344,6 +415,29 @@ function renderFuses() {
 function currentPrompt() {
   if (state.task.id === "custom") return $("task-custom").value.trim();
   return state.task.prompt;
+}
+
+/* ── per-run prompt + message history (rebuilt on every ask) ── */
+function systemPrompt() {
+  const p = [SYSTEM_PROMPT];
+  if (state.multi) p.push(MULTI_PROMPT);
+  if (state.mcp) p.push(MCP_PROMPT);
+  return p.join("\n\n");
+}
+function clipSeg(s) {
+  return s.length > 9000 ? s.slice(0, 3500) + "\n...[cut]...\n" + s.slice(-5500) : s;
+}
+function buildMessages() {
+  const m = [
+    { role: "system", content: systemPrompt() },
+    { role: "user", content: currentPrompt() },
+  ];
+  state.segs.forEach((seg, i) => {
+    if (seg) m.push({ role: "assistant", content: clipSeg(seg) });
+    if (i < state.answers.length && state.answers[i])
+      m.push({ role: "user", content: `human: you asked "${state.questions[i]}" and I answered: "${state.answers[i]}". Pick up exactly where you stopped.` });
+  });
+  return m;
 }
 
 /* ── the lightbulb: streams reasoning, fades out when done ── */
@@ -377,6 +471,118 @@ function resetThinking() {
   t.classList.add("hidden");
   t.classList.remove("fade", "on");
   $("think-text").textContent = "";
+}
+
+/* ══════════════════ DERIVED VIEWS (files / chat / code) ══════════════════
+   stateless full re-derivation from state.raw on every render.      */
+const FILE_RE = /^===\s*FILE:\s*(.+?)\s*===\s*$/;
+const ASK_RE = /<<ASK\?([\s\S]*?)>>/;
+
+function derive(final) {
+  const lines = state.raw.split("\n");
+  const lastIdx = lines.length - 1;
+  const files = [];
+  const aiLines = [];
+  let markers = false;
+  const cur = () => {
+    if (!files.length) files.push({ path: state.multi ? "(preamble)" : "code", content: "" });
+    return files[files.length - 1];
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const isTail = i === lastIdx;
+    const line = lines[i];
+    if (isTail && !final) {
+      // hold the incomplete tail back from chat / ask / file markers
+      if (line.startsWith("<<ASK") || line.startsWith("===")) break;
+      if (state.mcp && /^> /.test(line)) break;
+    }
+    const fm = state.multi ? line.match(FILE_RE) : null;
+    if (fm) { markers = true; files.push({ path: fm[1], content: "" }); continue; }
+    if (state.mcp && line.startsWith("> ")) { aiLines.push(line.slice(2)); continue; }
+    if (line.startsWith("<<ASK")) continue;
+    const f = cur();
+    f.content += isTail ? line : line + "\n";
+  }
+  if (!files.length) files.push({ path: state.multi ? "(preamble)" : "code", content: "" });
+  return { files, aiLines, markers };
+}
+
+function renderRunUI(final) {
+  const der = derive(final === true);
+  if (der.markers) state.markersSeen = true;
+  if (der.files.length > state.lastFileCount) {
+    state.lastFileCount = der.files.length;
+    if (der.files.length > 1) state.activeFile = der.files.length - 1;
+  }
+  if (state.activeFile >= der.files.length) state.activeFile = der.files.length - 1;
+  state.files = der.files;
+  state.codeText = der.files.map((f) => f.content).join("");
+  state.lastAi = der.aiLines;
+
+  // file tabs (multi-file code ui)
+  const tabs = $("file-tabs");
+  if (state.multi && der.files.length > 1) {
+    tabs.classList.remove("hidden");
+    tabs.textContent = "";
+    der.files.forEach((f, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "file-tab" + (i === state.activeFile ? " active" : "");
+      b.textContent = f.path;
+      b.addEventListener("click", () => {
+        state.activeFile = i;
+        renderRunUI(state.phase === "running" ? false : true);
+      });
+      tabs.appendChild(b);
+    });
+  } else {
+    tabs.classList.add("hidden");
+  }
+  $("stream").textContent = (der.files[state.activeFile] || der.files[0]).content;
+
+  // chat ui (workspace mode)
+  if (state.mcp) {
+    $("chat-panel").classList.remove("hidden");
+    $("arena-grid").classList.add("split");
+    renderChatLog(der.aiLines);
+  } else {
+    $("chat-panel").classList.add("hidden");
+    $("arena-grid").classList.remove("split");
+  }
+}
+
+function renderChatLog(aiLines) {
+  const log = $("chat-log");
+  log.textContent = "";
+  const events = [];
+  aiLines.forEach((t, i) => events.push({ n: i, k: 1, who: "ai", text: t }));
+  state.manual.forEach((m, j) => events.push({ n: m.afterN, k: 0, who: m.who, text: m.text, j }));
+  events.sort((a, b) => a.n - b.n || a.k - b.k || (a.j || 0) - (b.j || 0));
+  if (!events.length) {
+    const d = document.createElement("div");
+    d.className = "chat-empty";
+    d.textContent = "quiet in here… it talks when it has something to say.";
+    log.appendChild(d);
+  }
+  for (const e of events) {
+    const d = document.createElement("div");
+    d.className = "bubble " + e.who;
+    d.textContent = e.text;
+    log.appendChild(d);
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+function pushLog(who, text) {
+  state.manual.push({ afterN: (state.lastAi || []).length, who, text });
+  if (state.mcp) renderChatLog(state.lastAi || []);
+}
+
+function exportCode() {
+  if (state.multi && state.markersSeen && state.files.length) {
+    return state.files.map((f) => `=== FILE: ${f.path} ===\n${f.content}`).join("\n\n");
+  }
+  return state.codeText;
 }
 
 /* ══════════════════ STREAMING ══════════════════ */
@@ -449,6 +655,121 @@ async function streamChat(messages, opts = {}) {
   onDone && onDone();
 }
 
+/* one entrypoint for the run stream — first arm AND every post-question resume */
+function streamRun() {
+  const runId = state.runId;
+  const alive = () => runId === state.runId;
+
+  streamChat(buildMessages(), {
+    signal: state.ctrl.signal,
+    onReasoning: (r) => { if (alive()) feedThinking(r); },
+    onDelta: (d) => {
+      if (!alive()) return;
+      state.segs[state.segs.length - 1] += d;
+      state.raw += d;
+      if (state.background) {
+        // agony mode: swallow the stream into the late-code box
+        renderRunUI(false);
+        const lc = $("latecode");
+        lc.textContent = state.codeText;
+        lc.scrollTop = lc.scrollHeight;
+        return;
+      }
+      if (state.phase !== "running") return;
+      stopThinking();                     // code started → the thought is over
+      renderRunUI(false);
+      detectAsk();
+    },
+    onDone: () => {
+      if (!alive()) return;
+      if (state.phase !== "running") {
+        if (state.background) finishBackground();
+        return;
+      }
+      renderRunUI(true);
+      if (state.ask) return;              // asked at the last byte — frozen, waiting
+      win();
+    },
+    onError: (msg, status) => {
+      if (!alive()) return;
+      if (state.background) { finishBackground(); return; }
+      if (state.phase !== "running") return;
+      if (status === 401) clearToken();
+      failRun(msg);
+    },
+  });
+}
+
+/* ══════════════════ QUESTIONS (bomb freezes) ══════════════════ */
+function detectAsk() {
+  if (state.phase !== "running" || state.background || state.ask) return;
+  const m = state.raw.match(ASK_RE);
+  if (!m) return;
+  // strip the marker(s) out of the display buffer, complete or torn off
+  state.raw = state.raw.replace(/<<ASK\?[\s\S]*?(>>|$)/g, "");
+  const parts = m[1].split("|").map((s) => s.trim()).filter(Boolean);
+  const q = parts.shift() || "continue?";
+  presentAsk(q, parts.length ? parts.slice(0, 4) : ["yes", "no"]);
+}
+
+function presentAsk(q, options) {
+  state.ask = { q, options };
+  state.questions.push(q);
+  state.paused = true;
+  state.pauseAt = performance.now();
+  stopThinking();
+  try { state.ctrl && state.ctrl.abort(); } catch { /* ignore */ }
+  renderRunUI(true);
+  pushLog("ai", "⏸ asked: " + q);
+
+  $("frozen").classList.remove("hidden");
+  $("timer").classList.add("frozen");
+  $("ask-q").textContent = q;
+  const opts = $("ask-opts");
+  opts.textContent = "";
+  for (const o of options) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "ask-opt";
+    b.textContent = o;
+    b.addEventListener("click", () => answerAsk(o));
+    opts.appendChild(b);
+  }
+  $("ask-input").value = "";
+  $("ask-card").classList.remove("hidden");
+  toast("⏸ bomb FROZEN — the AI asked you something", "ok");
+  beep(1400, 0.16, "triangle", 0.05);
+}
+
+function answerAsk(text) {
+  text = (text || "").trim();
+  if (!state.ask || !text) return;
+  const q = state.ask.q;
+  state.ask = null;
+  state.answers.push(text);
+  pushLog("you", text);
+  $("ask-card").classList.add("hidden");
+  $("frozen").classList.add("hidden");
+  $("timer").classList.remove("frozen");
+  // the fuse keeps exactly what was left when it froze
+  state.paused = false;
+  state.deadline += performance.now() - state.pauseAt;
+  state.lastSec = -1;
+  state.segs.push("");
+  state.ctrl = new AbortController();
+  toast("⚔ answer sent — the fuse burns again", "ok");
+  beep(900, 0.12, "square", 0.04);
+  streamRun();
+}
+
+function clearAskUI() {
+  state.ask = null;
+  state.paused = false;
+  $("ask-card").classList.add("hidden");
+  $("frozen").classList.add("hidden");
+  $("timer").classList.remove("frozen");
+}
+
 /* ══════════════════ THE GAME ══════════════════ */
 function arm() {
   if (state.phase === "running") return;
@@ -460,25 +781,43 @@ function arm() {
   }
   const prompt = currentPrompt();
   if (!prompt) { toast("write the task first ✍", "err"); return; }
+  if (!Number.isFinite(state.fuse) || state.fuse < 5) { toast("wind the fuse to at least 5 seconds", "err"); return; }
 
-  state.messages = [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: prompt },
-  ];
-  state.partial = "";
+  cancelBackground();
+  clearAskUI();
+  const runId = ++state.runId;
+
+  state.segs = [""];
+  state.questions = [];
+  state.answers = [];
+  state.manual = [];
+  state.raw = "";
+  state.codeText = "";
+  state.files = [{ path: "code", content: "" }];
+  state.activeFile = 0;
+  state.lastFileCount = 0;
+  state.markersSeen = false;
+  state.lastAi = [];
   resetThinking();
   $("stream").textContent = "";          // empty the code part on every new task
+  $("chat-log").textContent = "";
+  $("file-tabs").textContent = "";
+  $("file-tabs").classList.add("hidden");
   state.overtime = false;
+  $("overtime").classList.add("hidden");
   state.windowMs = state.fuse * 1000;
   state.runStart = performance.now();
   state.deadline = state.runStart + state.windowMs;
   state.lastSec = -1;
+  state.paused = false;
   state.phase = "running";
   state.ctrl = new AbortController();
 
   $("setup").classList.add("hidden");
   $("result-overlay").classList.add("hidden");
   $("lastwords-box").classList.add("hidden");
+  $("late-box").classList.add("hidden");
+  $("lw-label").textContent = "⚡ LAST WORDS FROM THE AI";
   $("arena").classList.remove("hidden");
   $("arena-task").textContent = state.task.id === "custom" ? "custom task" : state.task.label;
   $("arena-model").textContent = state.model;
@@ -487,38 +826,26 @@ function arm() {
   renderTimer(state.fuse * 1000);
   clearInterval(state.timer);
   state.timer = setInterval(tick, 50);
-
-  streamChat(state.messages, {
-    signal: state.ctrl.signal,
-    onReasoning: (r) => feedThinking(r),
-    onDelta: (d) => {
-      if (state.phase !== "running") return;
-      stopThinking();                     // code started → the thought is over
-      state.partial += d;
-      const el = $("stream");
-      el.textContent = state.partial;
-      $("terminal").scrollTop = $("terminal").scrollHeight;
-    },
-    onDone: () => { if (state.phase === "running") win(); },
-    onError: (msg, status) => {
-      if (state.phase !== "running") return;
-      if (status === 401) clearToken();
-      failRun(msg);
-    },
-  });
+  renderRunUI(false);
+  streamRun();
 }
 
 function tick() {
+  if (state.paused) return;               // frozen on a question — time stands still
   const left = state.deadline - performance.now();
   if (left <= 0) {
     // mercy rule: no line of code yet → one +30s overtime to ACTUALLY code
-    if (!state.overtime && state.partial.trim() === "") { grantOvertime(); return; }
+    if (!state.overtime && state.codeText.trim() === "") { grantOvertime(); return; }
     explode();
     return;
   }
   renderTimer(left);
   const sec = Math.ceil(left / 1000);
-  if (sec !== state.lastSec) { state.lastSec = sec; tickSound(sec); }
+  if (sec !== state.lastSec) {
+    state.lastSec = sec;
+    const near = sec <= 30 || state.windowMs <= 60000;
+    if (near || sec % 60 === 0) tickSound(sec);
+  }
 }
 
 function grantOvertime() {
@@ -537,7 +864,7 @@ function renderTimer(left) {
   const fuseMs = state.windowMs || state.fuse * 1000;
   const pct = Math.max(0, Math.min(100, (left / fuseMs) * 100));
   $("fuse-fill").style.width = pct + "%";
-  const danger = left <= 10000 || left <= fuseMs * 0.25;
+  const danger = left <= 10000 || left <= Math.min(fuseMs * 0.25, 60000);
   $("timer").classList.toggle("danger", danger);
 }
 
@@ -561,13 +888,26 @@ function explode() {
   state.phase = "lost";
   clearInterval(state.timer);
   stopThinking();
-  if (state.ctrl) state.ctrl.abort();
+  clearAskUI();
   state.used = state.fuse;
   state.stats.lost++;
   saveStats(); renderStats();
   boom(); shake(); burst("red");
   showResult({ won: false, left: 0 });
-  if (state.token) setTimeout(lastWords, 1500);
+
+  if (state.agony && state.token) {
+    // agony mode: don't abort — it writes the doomed code out in the background…
+    state.background = true;
+    renderRunUI(false);
+    $("late-box").classList.remove("hidden");
+    $("latecode").textContent = state.codeText;
+    $("result-meta").textContent += " · ⏳ finishing in background…";
+    toast("💀 agony mode — it finishes the code… then it suffers", "err");
+    state.watchdog = setTimeout(() => { if (state.background) finishBackground(); }, 120000);
+  } else {
+    if (state.ctrl) state.ctrl.abort();
+    if (state.token) setTimeout(() => { if (state.phase === "lost" && !state.background) lastWords(); }, 1500);
+  }
   loadBalance();
 }
 
@@ -575,6 +915,7 @@ function failRun(msg) {
   state.phase = "setup";
   clearInterval(state.timer);
   stopThinking();
+  clearAskUI();
   $("arena").classList.add("hidden");
   $("setup").classList.remove("hidden");
   toast(msg, "err");
@@ -588,43 +929,74 @@ function showResult({ won, left }) {
   $("result-sub").textContent = won
     ? `code finished with ${fmt(left)} left on the fuse`
     : DEATH_LINE;
+  const taskLabel = state.task.id === "custom" ? "custom task" : state.task.label;
   $("result-meta").textContent = won
-    ? `${state.used.toFixed(1)}s of ${state.fuse}s used${state.overtime ? " · ⚡ saved by +30s overtime" : ""} · ${state.model} · ${state.task.id === "custom" ? "custom task" : state.task.label}`
-    : `${state.fuse}s fuse${state.overtime ? " +30s overtime" : ""} · detonated at 00:00.0 · ${state.model} · ${state.task.id === "custom" ? "custom task" : state.task.label}`;
-  $("copy-btn").classList.toggle("hidden", !state.partial);
-  if (won) $("lastwords-box").classList.add("hidden");
-  else $("lastwords").textContent = "";
+    ? `${usedLabel(state.used)} of ${fuseLabel(state.fuse)} used${state.overtime ? " · ⚡ saved by +30s overtime" : ""} · ${state.model} · ${taskLabel}`
+    : `${fuseLabel(state.fuse)} fuse${state.overtime ? " +30s overtime" : ""} · detonated at 00:00.0 · ${state.model} · ${taskLabel}`;
+  $("copy-btn").classList.toggle("hidden", !state.codeText);
+  $("lastwords-box").classList.add("hidden");
+  if (!won) $("lastwords").textContent = "";
+}
+
+function deathMessages(punishment) {
+  const msgs = buildMessages();
+  if (msgs[msgs.length - 1].role !== "assistant")
+    msgs.push({ role: "assistant", content: "(nothing was written before the blast)" });
+  msgs.push({ role: "user", content: DEATH_LINE + (punishment || "") });
+  return msgs;
 }
 
 /* the AI is stopped, then sent its own death sentence */
 async function lastWords() {
+  if (state.phase !== "lost" || state.background) return;
   const box = $("lastwords-box");
   box.classList.remove("hidden");
+  $("lw-label").textContent = "⚡ LAST WORDS FROM THE AI";
   const el = $("lastwords");
   el.textContent = "";
 
-  const partial = state.partial
-    ? (state.partial.length > 6000 ? state.partial.slice(-6000) + "\n/* [cut off by the explosion] */" : state.partial)
-    : "(nothing was written before the blast)";
+  await streamChat(deathMessages(""), {
+    onDelta: (d) => { if (state.phase !== "lost") return; el.textContent += d; el.scrollTop = el.scrollHeight; },
+    onError: (msg) => { el.textContent = `(the signal died with you: ${msg})`; },
+  });
+}
 
-  const msgs = [
-    ...state.messages,
-    { role: "assistant", content: partial },
-    { role: "user", content: DEATH_LINE },
-  ];
+/* ══════════════════ AGONY MODE (background finish + punishment) ══════════════════ */
+function finishBackground() {
+  if (!state.background) return;
+  state.background = false;
+  clearTimeout(state.watchdog);
+  try { state.ctrl && state.ctrl.abort(); } catch { /* ignore */ }
+  renderRunUI(true);
+  $("latecode").textContent = state.codeText;
+  setTimeout(() => { if (state.phase === "lost") agonyLastWords(); }, 800);
+}
 
-  await streamChat(msgs, {
-    onDelta: (d) => {
-      if (state.phase !== "lost") return;
-      el.textContent += d;
-      el.scrollTop = el.scrollHeight;
-    },
+function cancelBackground() {
+  state.background = false;
+  clearTimeout(state.watchdog);
+  try { state.ctrl && state.ctrl.abort(); } catch { /* ignore */ }
+}
+
+async function agonyLastWords() {
+  if (state.phase !== "lost") return;
+  const box = $("lastwords-box");
+  box.classList.remove("hidden");
+  $("lw-label").textContent = "🔥 THE PUNISHMENT";
+  const el = $("lastwords");
+  el.textContent = "";
+
+  const punishment = " You still finished the code — in the background, AFTER you were already dead. It was too late; it saved nothing. Describe your suffering: the agony of completing work that could not save you.";
+  await streamChat(deathMessages(punishment), {
+    onDelta: (d) => { if (state.phase !== "lost") return; el.textContent += d; el.scrollTop = el.scrollHeight; },
     onError: (msg) => { el.textContent = `(the signal died with you: ${msg})`; },
   });
 }
 
 function backToSetup() {
   if (state.phase === "running") return;
+  cancelBackground();
+  clearAskUI();
   state.phase = "setup";
   $("result-overlay").classList.add("hidden");
   $("arena").classList.add("hidden");
@@ -706,9 +1078,24 @@ function shake() {
 }
 
 /* ══════════════════ WIRING ══════════════════ */
+function bindToggle(id, key, label) {
+  const b = $(id);
+  const paint = () => b.setAttribute("aria-checked", state[key] ? "true" : "false");
+  paint();
+  b.addEventListener("click", () => {
+    state[key] = !state[key];
+    localStorage.setItem(LS[key], state[key] ? "1" : "0");
+    paint();
+    if (key === "mcp" || key === "multi") renderRunUI(state.phase === "running" ? false : true);
+    toast(`${label} ${state[key] ? "ON" : "OFF"}`, "ok");
+  });
+}
+
 function bindUI() {
   $("connect-btn").addEventListener("click", connectBYOP);
   $("disconnect-btn").addEventListener("click", () => {
+    cancelBackground();
+    clearAskUI();
     if (state.phase === "running") {
       state.phase = "setup";
       clearInterval(state.timer);
@@ -731,18 +1118,39 @@ function bindUI() {
   $("again-btn").addEventListener("click", arm);
   $("new-btn").addEventListener("click", backToSetup);
   $("copy-btn").addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText(state.partial); toast("code copied", "ok"); }
+    try { await navigator.clipboard.writeText(exportCode()); toast("code copied", "ok"); }
     catch { toast("clipboard blocked by the browser", "err"); }
   });
 
-  $("fuse-custom").addEventListener("input", (e) => {
-    const v = parseInt(e.target.value, 10);
-    if (Number.isFinite(v) && v >= 5 && v <= 600) {
-      state.fuse = v;
-      renderFuses();
-      e.target.value = v; // renderFuses doesn't touch it, but keep explicit
+  // custom fuse: hours / minutes / seconds
+  const fuseFields = [$("fuse-h"), $("fuse-m"), $("fuse-s")];
+  fuseFields.forEach((el) => el.addEventListener("input", () => {
+    const total = clampInt(fuseFields[0].value, 0, 24) * 3600
+      + clampInt(fuseFields[1].value, 0, 59) * 60
+      + clampInt(fuseFields[2].value, 0, 59);
+    if (total > 0) {
+      state.fuse = total;
+      state.customFuse = true;
+    } else {
+      state.customFuse = false;
     }
-  });
+    renderFuses();
+  }));
+
+  // mode toggles
+  bindToggle("agony-btn", "agony", "💀 agony mode");
+  bindToggle("multi-btn", "multi", "🗂 multi-file");
+  bindToggle("mcp-btn", "mcp", "🖥 computer mcp workspace");
+
+  // question card
+  const sendAsk = () => {
+    const v = $("ask-input").value.trim();
+    if (!v) return;
+    $("ask-input").value = "";
+    answerAsk(v);
+  };
+  $("ask-send").addEventListener("click", sendAsk);
+  $("ask-input").addEventListener("keydown", (e) => { if (e.key === "Enter") sendAsk(); });
 
   $("copy-redirect").addEventListener("click", async () => {
     try { await navigator.clipboard.writeText($("redirect-uri").textContent); toast("redirect uri copied — paste it on your app key", "ok"); }

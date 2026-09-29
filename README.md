@@ -38,6 +38,10 @@ No secrets in the app: the token lives in `sessionStorage` only, never
 | defused ✅ | stream completes before `0` → `💣 DEFUSED`, time saved to stats |
 | exploded 💀 | at `0` we `AbortController.abort()` mid-stream → screen shake, boom SFX |
 | ⚡ overtime | fuse hit zero with **zero lines of code** (it only thought) → one grace of **+30s** to actually code it — then it's final |
+| custom fuse | presets **plus h/m/s inputs** — wind it for seconds… all the way to 24h |
+| 💀 agony mode | toggle: on fail it **finishes the code in the background** (streams live into the overlay), then gets the punishment message and must describe its suffering |
+| 🗂 multi-file | toggle: the AI splits output into files via `=== FILE: path ===` → each file gets a tab in the code ui |
+| 🖥 computer mcp | toggle: **chat ui** where it talks (`> ` lines) + **code ui**; it can ask `<<ASK? q \| a \| b >>` → **the bomb FREEZES** until you pick an option or type an answer |
 | last words | partial code + the exact `YOU LOSE…` line are sent back → the dying AI replies |
 
 Model catalog is live from `GET /text/models` (no auth needed).

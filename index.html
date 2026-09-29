@@ -62,7 +62,11 @@
       <section class="ctl">
         <h2>2 · fuse</h2>
         <div id="fuse-chips" class="chips"></div>
-        <label class="custom-fuse">custom <input id="fuse-custom" type="number" min="5" max="600" step="5" placeholder="30" /> s</label>
+        <label class="custom-fuse">custom
+          <input id="fuse-h" type="number" min="0" max="24" placeholder="0" aria-label="hours" /> h
+          <input id="fuse-m" type="number" min="0" max="59" placeholder="0" aria-label="minutes" /> m
+          <input id="fuse-s" type="number" min="0" max="59" placeholder="30" aria-label="seconds" /> s
+        </label>
         <p class="hint" id="fuse-hint"></p>
       </section>
 
@@ -73,6 +77,30 @@
       </section>
     </div>
 
+    <div class="toggles">
+      <div class="toggle-row">
+        <button id="agony-btn" class="toggle" type="button" role="switch" aria-checked="false" aria-label="agony mode"><span class="knob"></span></button>
+        <div class="toggle-text">
+          <strong>💀 agony mode</strong>
+          <span>if it fails to finish: let it write the code out <em>in the background</em> anyway — then force it to suffer for finishing too late. off = instant death.</span>
+        </div>
+      </div>
+      <div class="toggle-row">
+        <button id="multi-btn" class="toggle" type="button" role="switch" aria-checked="false" aria-label="multi-file mode"><span class="knob"></span></button>
+        <div class="toggle-text">
+          <strong>🗂 multi-file</strong>
+          <span>it can write several files at once — each one starts with <code>=== FILE: path ===</code> and gets its own tab in the code ui.</span>
+        </div>
+      </div>
+      <div class="toggle-row">
+        <button id="mcp-btn" class="toggle" type="button" role="switch" aria-checked="false" aria-label="computer mcp workspace mode"><span class="knob"></span></button>
+        <div class="toggle-text">
+          <strong>🖥 computer mcp · workspace</strong>
+          <span>the pollinations computer mcp way: a <b>chat ui</b> where it talks to you — and can <b>ask questions that freeze the bomb</b> until you pick an answer — next to a live <b>code ui</b> of what it's writing.</span>
+        </div>
+      </div>
+    </div>
+
     <button id="arm-btn" class="btn arm" type="button">💣 ARM THE BOMB</button>
 
     <details class="how">
@@ -81,6 +109,8 @@
         <li>Arm → the model streams code via <code>POST /v1/chat/completions</code>, the fuse burns down.</li>
         <li>Code finished before zero → <strong>💣 DEFUSED</strong>, time saved.</li>
         <li>Fuse hits zero → the stream is <code>abort()</code>ed mid-token, the bomb goes off, and the AI is sent <strong>“YOU LOSE…”</strong> — its last words stream into the overlay.</li>
+        <li>Fuse hits zero with <strong>zero code</strong> (it only thought) → one grace: <strong>⚡ +30s overtime</strong> to actually code.</li>
+        <li>Optional modes above: 💀 agony (background finish + punishment), 🗂 multi-file, 🖥 computer-mcp workspace with freeze-questions.</li>
         <li>☠️ <em>detonate</em> gives up on purpose. Everything runs on your connected wallet only.</li>
       </ol>
     </details>
@@ -92,6 +122,7 @@
       <div class="timer" id="timer">00:00.0</div>
       <div class="arena-meta">
         <div id="overtime" class="ot-badge hidden">⚡ OVERTIME · +30s to actually code it</div>
+        <div id="frozen" class="fz-badge hidden">⏸ FROZEN · answer the AI to resume</div>
         <div class="arena-task" id="arena-task"></div>
         <div class="arena-model" id="arena-model"></div>
       </div>
@@ -102,23 +133,46 @@
       <div class="fuse-fill" id="fuse-fill"><span class="spark"></span></div>
     </div>
 
-    <div id="thinking" class="thinking hidden" aria-hidden="true">
-      <svg class="bulb" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M9.2 18.2h5.6M10 21.2h4"/>
-        <path d="M12 2.8a6.2 6.2 0 0 0-3.6 11.2c.5.4.86 1 1 1.65l.08.5h5.04l.08-.5c.14-.65.5-1.25 1-1.65A6.2 6.2 0 0 0 12 2.8z"/>
-        <path class="ray" d="M12 0.6v1.4"/>
-        <path class="ray" d="M4.4 4.4l1 1"/>
-        <path class="ray" d="M19.6 4.4l-1 1"/>
-        <path class="ray" d="M1.6 12h1.4"/>
-        <path class="ray" d="M21 12h1.4"/>
-      </svg>
-      <div class="think-body">
-        <div class="think-label">Thinking<span class="tdots">...</span></div>
-        <div class="think-text"><span id="think-text"></span></div>
+    <div class="arena-grid" id="arena-grid">
+
+      <!-- chat ui: where the ai talks (workspace mode) -->
+      <section id="chat-panel" class="chat-panel hidden" aria-label="chat with the AI">
+        <div class="chat-head">💬 chat <span class="chat-sub">it talks here</span></div>
+        <div id="chat-log" class="chat-log"></div>
+        <div id="ask-card" class="ask-card hidden">
+          <div class="ask-tag">⏸ the bomb is frozen until you answer</div>
+          <div class="ask-q" id="ask-q"></div>
+          <div class="ask-opts" id="ask-opts"></div>
+          <div class="ask-free">
+            <input id="ask-input" type="text" placeholder="…or type your own answer" autocomplete="off" />
+            <button id="ask-send" class="btn tiny" type="button">send</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- code ui: what it's coding -->
+      <div class="col-code">
+        <div id="thinking" class="thinking hidden" aria-hidden="true">
+          <svg class="bulb" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9.2 18.2h5.6M10 21.2h4"/>
+            <path d="M12 2.8a6.2 6.2 0 0 0-3.6 11.2c.5.4.86 1 1 1.65l.08.5h5.04l.08-.5c.14-.65.5-1.25 1-1.65A6.2 6.2 0 0 0 12 2.8z"/>
+            <path class="ray" d="M12 0.6v1.4"/>
+            <path class="ray" d="M4.4 4.4l1 1"/>
+            <path class="ray" d="M19.6 4.4l-1 1"/>
+            <path class="ray" d="M1.6 12h1.4"/>
+            <path class="ray" d="M21 12h1.4"/>
+          </svg>
+          <div class="think-body">
+            <div class="think-label">Thinking<span class="tdots">...</span></div>
+            <div class="think-text"><span id="think-text"></span></div>
+          </div>
+        </div>
+
+        <div id="file-tabs" class="file-tabs hidden"></div>
+
+        <pre class="terminal" id="terminal"><code id="stream"></code></pre>
       </div>
     </div>
-
-    <pre class="terminal" id="terminal"><code id="stream"></code></pre>
   </section>
 </main>
 
@@ -129,8 +183,13 @@
     <div class="sub" id="result-sub"></div>
     <div class="meta" id="result-meta"></div>
 
+    <div id="late-box" class="lastwords latecode hidden">
+      <div class="lw-label">📜 FINISHED ANYWAY — TOO LATE</div>
+      <div class="lw-text" id="latecode"></div>
+    </div>
+
     <div id="lastwords-box" class="lastwords hidden">
-      <div class="lw-label">⚡ LAST WORDS FROM THE AI</div>
+      <div class="lw-label" id="lw-label">⚡ LAST WORDS FROM THE AI</div>
       <div class="lw-text" id="lastwords"></div>
     </div>
 
