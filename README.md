@@ -8,6 +8,8 @@ the bomb explodes, and the AI is sent:
 
 …then its last words stream into the overlay.
 
+Built with [pollinations.ai](https://pollinations.ai) — 🏵️ [Add Pollen to your app](https://pollinations.ai/apps).
+
 ## Run it locally
 
 ```bash
