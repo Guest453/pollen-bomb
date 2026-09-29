@@ -110,6 +110,9 @@ const state = {
   reasoning: "",
   thinkingShown: false,
   thinkingDone: false,
+  overtime: false,
+  windowMs: 0,
+  runStart: 0,
   used: 0,
   deadline: 0,
   timer: null,
@@ -465,7 +468,10 @@ function arm() {
   state.partial = "";
   resetThinking();
   $("stream").textContent = "";          // empty the code part on every new task
-  state.deadline = performance.now() + state.fuse * 1000;
+  state.overtime = false;
+  state.windowMs = state.fuse * 1000;
+  state.runStart = performance.now();
+  state.deadline = state.runStart + state.windowMs;
   state.lastSec = -1;
   state.phase = "running";
   state.ctrl = new AbortController();
@@ -504,15 +510,31 @@ function arm() {
 
 function tick() {
   const left = state.deadline - performance.now();
-  if (left <= 0) { explode(); return; }
+  if (left <= 0) {
+    // mercy rule: no line of code yet → one +30s overtime to ACTUALLY code
+    if (!state.overtime && state.partial.trim() === "") { grantOvertime(); return; }
+    explode();
+    return;
+  }
   renderTimer(left);
   const sec = Math.ceil(left / 1000);
   if (sec !== state.lastSec) { state.lastSec = sec; tickSound(sec); }
 }
 
+function grantOvertime() {
+  state.overtime = true;
+  state.windowMs = 30000;
+  state.deadline = performance.now() + 30000;
+  state.lastSec = -1;
+  $("overtime").classList.remove("hidden");
+  toast("🚨 no code yet — +30s OVERTIME to actually code it", "err");
+  beep(1700, 0.14, "square", 0.05);
+  renderTimer(30000);
+}
+
 function renderTimer(left) {
   $("timer").textContent = fmt(left);
-  const fuseMs = state.fuse * 1000;
+  const fuseMs = state.windowMs || state.fuse * 1000;
   const pct = Math.max(0, Math.min(100, (left / fuseMs) * 100));
   $("fuse-fill").style.width = pct + "%";
   const danger = left <= 10000 || left <= fuseMs * 0.25;
@@ -525,7 +547,7 @@ function win() {
   clearInterval(state.timer);
   stopThinking();
   const left = Math.max(0, state.deadline - performance.now());
-  state.used = (state.fuse * 1000 - left) / 1000;
+  state.used = (performance.now() - state.runStart) / 1000;
   state.stats.won++;
   if (state.stats.best == null || state.used < state.stats.best) state.stats.best = state.used;
   saveStats(); renderStats();
@@ -567,8 +589,8 @@ function showResult({ won, left }) {
     ? `code finished with ${fmt(left)} left on the fuse`
     : DEATH_LINE;
   $("result-meta").textContent = won
-    ? `${state.used.toFixed(1)}s of ${state.fuse}s used · ${state.model} · ${state.task.id === "custom" ? "custom task" : state.task.label}`
-    : `${state.fuse}s fuse · detonated at 00:00.0 · ${state.model} · ${state.task.id === "custom" ? "custom task" : state.task.label}`;
+    ? `${state.used.toFixed(1)}s of ${state.fuse}s used${state.overtime ? " · ⚡ saved by +30s overtime" : ""} · ${state.model} · ${state.task.id === "custom" ? "custom task" : state.task.label}`
+    : `${state.fuse}s fuse${state.overtime ? " +30s overtime" : ""} · detonated at 00:00.0 · ${state.model} · ${state.task.id === "custom" ? "custom task" : state.task.label}`;
   $("copy-btn").classList.toggle("hidden", !state.partial);
   if (won) $("lastwords-box").classList.add("hidden");
   else $("lastwords").textContent = "";

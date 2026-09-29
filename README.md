@@ -37,6 +37,7 @@ No secrets in the app: the token lives in `sessionStorage` only, never
 | tick | fuse bar burns down, `AbortController` armed, countdown rendered every 50 ms |
 | defused ✅ | stream completes before `0` → `💣 DEFUSED`, time saved to stats |
 | exploded 💀 | at `0` we `AbortController.abort()` mid-stream → screen shake, boom SFX |
+| ⚡ overtime | fuse hit zero with **zero lines of code** (it only thought) → one grace of **+30s** to actually code it — then it's final |
 | last words | partial code + the exact `YOU LOSE…` line are sent back → the dying AI replies |
 
 Model catalog is live from `GET /text/models` (no auth needed).

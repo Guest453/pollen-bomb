@@ -151,6 +151,12 @@ select{cursor:pointer}
 .timer.danger{color:var(--red);animation:pulse .48s steps(2) infinite;text-shadow:0 0 40px rgba(255,59,59,.75)}
 @keyframes pulse{50%{opacity:.45}}
 .arena-meta{flex:1;min-width:200px}
+.ot-badge{
+  display:inline-block;margin-bottom:6px;padding:4px 10px;border-radius:99px;
+  font:700 11px/1 var(--mono);letter-spacing:1px;color:#ffd9b0;
+  background:rgba(255,157,47,.16);border:1px solid rgba(255,157,47,.6);
+  box-shadow:0 0 18px rgba(255,157,47,.35);animation:pulse .5s steps(2) infinite;
+}
 .arena-task{font-weight:700;font-size:15px}
 .arena-model{font:12px var(--mono);color:var(--dim);margin-top:3px}
 
