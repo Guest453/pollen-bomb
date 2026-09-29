@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pollen Bomb 💣 — code before the fuse dies</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💣</text></svg>" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">💣 POLLEN<span>BOMB</span></div>
+
+  <div class="top-right">
+    <button id="sound-btn" class="icon-btn" type="button" title="sound on/off">🔊</button>
+    <span id="balance" class="pill hidden"></span>
+
+    <div class="auth">
+      <button id="connect-btn" class="btn ghost" type="button">Connect wallet · BYOP</button>
+      <div class="authed hidden" id="authed">
+        <span id="who" class="who">connected</span>
+        <button id="disconnect-btn" class="btn tiny" type="button">disconnect</button>
+      </div>
+
+      <details id="dev-details">
+        <summary>🧪 dev key</summary>
+        <div class="dev-row">
+          <input id="dev-key" type="password" placeholder="sk_… (local testing only)" autocomplete="off" spellcheck="false" />
+          <button id="dev-use" class="btn tiny" type="button">use</button>
+          <button id="dev-clear" class="btn tiny" type="button">clear</button>
+        </div>
+        <p class="warn">secret keys never belong in client code — this is only for testing on your own machine. ship BYOP.</p>
+      </details>
+    </div>
+  </div>
+</header>
+
+<main id="shake">
+
+  <!-- ══════════ SETUP ══════════ -->
+  <section id="setup" class="panel">
+    <h1>the fuse is <em>yours</em>.<br />the code is <em>theirs</em>.</h1>
+    <p class="lede">set a time limit, pick a task, arm the bomb. the ai streams code until the fuse hits&nbsp;zero — if it isn't finished, it dies.</p>
+
+    <div class="controls">
+      <section class="ctl">
+        <h2>1 · task</h2>
+        <div id="task-chips" class="chips"></div>
+        <textarea id="task-custom" class="hidden" rows="4" spellcheck="false"
+          placeholder="write the exact code the AI must produce, e.g. &quot;an express middleware that rate-limits by IP, raw code only&quot;"></textarea>
+      </section>
+
+      <section class="ctl">
+        <h2>2 · fuse</h2>
+        <div id="fuse-chips" class="chips"></div>
+        <label class="custom-fuse">custom <input id="fuse-custom" type="number" min="5" max="600" step="5" placeholder="30" /> s</label>
+        <p class="hint" id="fuse-hint"></p>
+      </section>
+
+      <section class="ctl">
+        <h2>3 · model</h2>
+        <select id="model"></select>
+        <p class="hint" id="model-hint">loading catalog…</p>
+      </section>
+    </div>
+
+    <button id="arm-btn" class="btn arm" type="button">💣 ARM THE BOMB</button>
+    <p class="hint center" id="arm-hint">this runs on <strong>your</strong> pollen — connect a wallet to play.</p>
+
+    <details class="how">
+      <summary>how it works / setup</summary>
+      <ol>
+        <li>Create an <strong>App Key</strong> (<code>pk_…</code>) at <a href="https://enter.pollinations.ai/keys" target="_blank" rel="noopener">enter.pollinations.ai/keys</a> → “Create New App Key”.</li>
+        <li>Add this exact <strong>Redirect URI</strong> on that key:</li>
+      </ol>
+      <p class="redirect"><code id="redirect-uri"></code> <button id="copy-redirect" class="btn tiny" type="button">copy</button></p>
+      <ol start="3">
+        <li>Paste the <code>pk_</code> where? — you don't: hit <strong>Connect wallet</strong>, sign in with GitHub, approve <em>usage</em>, and Pollinations hands this tab a temporary scoped <code>sk_</code> (PKCE, 7&nbsp;days, revocable anytime).</li>
+        <li>Arm the bomb. The AI streams via <code>POST /v1/chat/completions</code>; the moment the fuse dies we <code>AbortController()</code> the stream and send it <strong>“YOU LOSE…”</strong>.</li>
+      </ol>
+      <p class="warn">serve this folder over <code>http://localhost</code> (run <code>node server.js</code>) — OAuth redirects don't work from <code>file://</code>.</p>
+    </details>
+  </section>
+
+  <!-- ══════════ ARENA ══════════ -->
+  <section id="arena" class="panel hidden">
+    <div class="arena-top">
+      <div class="timer" id="timer">00:00.0</div>
+      <div class="arena-meta">
+        <div class="arena-task" id="arena-task"></div>
+        <div class="arena-model" id="arena-model"></div>
+      </div>
+      <button id="detonate-btn" class="btn danger tiny" type="button">☠️ detonate</button>
+    </div>
+
+    <div class="fuse-track">
+      <div class="fuse-fill" id="fuse-fill"><span class="spark"></span></div>
+    </div>
+
+    <pre class="terminal" id="terminal"><code id="stream"></code></pre>
+  </section>
+</main>
+
+<!-- ══════════ RESULT OVERLAY ══════════ -->
+<div id="result-overlay" class="overlay hidden">
+  <div class="overlay-card">
+    <div class="big" id="result-big">YOU LOSE</div>
+    <div class="sub" id="result-sub"></div>
+    <div class="meta" id="result-meta"></div>
+
+    <div id="lastwords-box" class="lastwords hidden">
+      <div class="lw-label">⚡ LAST WORDS FROM THE AI</div>
+      <div class="lw-text" id="lastwords"></div>
+    </div>
+
+    <div class="overlay-actions">
+      <button id="again-btn" class="btn" type="button">🔁 run it again</button>
+      <button id="copy-btn" class="btn ghost tiny hidden" type="button">copy code</button>
+      <button id="new-btn" class="btn ghost" type="button">new task</button>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <span id="stats">defused 0 · exploded 0</span>
+  <span class="credit">byop · your pollen, your bomb</span>
+</footer>
+
+<div id="toast" class="hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
