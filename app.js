@@ -107,6 +107,9 @@ const state = {
   fuse: 30,
   messages: [],
   partial: "",
+  reasoning: "",
+  thinkingShown: false,
+  thinkingDone: false,
   used: 0,
   deadline: 0,
   timer: null,
@@ -233,12 +236,11 @@ function clearToken() {
 
 function renderAuth() {
   const authed = !!state.token;
-  $("connect-btn").classList.toggle("hidden", authed);
   $("authed").classList.toggle("hidden", !authed);
-  $("arm-hint").classList.toggle("hidden", authed);
-  $("who").textContent = state.keyKind === "oauth" ? "byop · connected" : "dev key active";
-  $("disconnect-btn").textContent = state.keyKind === "oauth" ? "disconnect" : "clear key";
-  if (state.keyKind === "oauth") loadBalance();
+  // the dashboard only exists after a BYOP connect
+  $("gate").classList.toggle("hidden", authed);
+  if (state.phase !== "running") $("setup").classList.toggle("hidden", !authed);
+  if (authed) loadBalance();
 }
 
 async function loadBalance() {
@@ -253,15 +255,6 @@ async function loadBalance() {
       el.classList.remove("hidden");
     }
   } catch { /* offline / no scope — pill just stays hidden */ }
-}
-
-function useDevKey() {
-  const v = $("dev-key").value.trim();
-  if (!/^(sk_|pk_)/.test(v)) { toast("paste a key starting with sk_ (or legacy pk_)", "err"); return; }
-  setToken(v, "dev", null);
-  $("dev-key").value = "";
-  if (v.startsWith("pk_")) toast("raw publishable key — legacy, limited to 1 pollen/IP/hour. BYOP is better.", "err");
-  else toast("dev key loaded — local testing only, never ship it", "ok");
 }
 
 /* ══════════════════ MODEL CATALOG ══════════════════ */
@@ -350,9 +343,42 @@ function currentPrompt() {
   return state.task.prompt;
 }
 
+/* ── the lightbulb: streams reasoning, fades out when done ── */
+function feedThinking(text) {
+  if (state.thinkingDone || state.phase !== "running") return;
+  state.reasoning += text;
+  $("think-text").textContent = state.reasoning;
+  if (state.thinkingShown) return;
+  state.thinkingShown = true;
+  const t = $("thinking");
+  t.classList.remove("hidden", "fade");
+  t.classList.add("on");
+}
+function stopThinking() {
+  state.thinkingDone = true;
+  const t = $("thinking");
+  if (t.classList.contains("hidden")) return;
+  t.classList.remove("on");
+  t.classList.add("fade");
+  setTimeout(() => {
+    t.classList.add("hidden");
+    t.classList.remove("fade");
+    $("think-text").textContent = "";
+  }, 470);
+}
+function resetThinking() {
+  state.reasoning = "";
+  state.thinkingShown = false;
+  state.thinkingDone = false;
+  const t = $("thinking");
+  t.classList.add("hidden");
+  t.classList.remove("fade", "on");
+  $("think-text").textContent = "";
+}
+
 /* ══════════════════ STREAMING ══════════════════ */
 async function streamChat(messages, opts = {}) {
-  const { signal, onDelta, onDone, onError } = opts;
+  const { signal, onDelta, onReasoning, onDone, onError } = opts;
 
   let res;
   try {
@@ -401,10 +427,14 @@ async function streamChat(messages, opts = {}) {
         let j;
         try { j = JSON.parse(payload); } catch { continue; }
         if (j.error) throw new Error(j.error.message || "stream error");
-        const delta = j.choices && j.choices[0] && j.choices[0].delta
-          ? j.choices[0].delta.content
-          : null;
-        if (delta) onDelta && onDelta(delta);
+        const d = j.choices && j.choices[0] ? j.choices[0].delta : null;
+        if (d) {
+          if (d.content) onDelta && onDelta(d.content);
+          const think = d.reasoning_content != null
+            ? d.reasoning_content
+            : (typeof d.reasoning === "string" ? d.reasoning : null);
+          if (think) onReasoning && onReasoning(think);
+        }
       }
       if (sawDone) break;
     }
@@ -433,6 +463,8 @@ function arm() {
     { role: "user", content: prompt },
   ];
   state.partial = "";
+  resetThinking();
+  $("stream").textContent = "";          // empty the code part on every new task
   state.deadline = performance.now() + state.fuse * 1000;
   state.lastSec = -1;
   state.phase = "running";
@@ -452,8 +484,10 @@ function arm() {
 
   streamChat(state.messages, {
     signal: state.ctrl.signal,
+    onReasoning: (r) => feedThinking(r),
     onDelta: (d) => {
       if (state.phase !== "running") return;
+      stopThinking();                     // code started → the thought is over
       state.partial += d;
       const el = $("stream");
       el.textContent = state.partial;
@@ -489,6 +523,7 @@ function win() {
   if (state.phase !== "running") return;
   state.phase = "won";
   clearInterval(state.timer);
+  stopThinking();
   const left = Math.max(0, state.deadline - performance.now());
   state.used = (state.fuse * 1000 - left) / 1000;
   state.stats.won++;
@@ -503,6 +538,7 @@ function explode() {
   if (state.phase !== "running") return;
   state.phase = "lost";
   clearInterval(state.timer);
+  stopThinking();
   if (state.ctrl) state.ctrl.abort();
   state.used = state.fuse;
   state.stats.lost++;
@@ -516,6 +552,7 @@ function explode() {
 function failRun(msg) {
   state.phase = "setup";
   clearInterval(state.timer);
+  stopThinking();
   $("arena").classList.add("hidden");
   $("setup").classList.remove("hidden");
   toast(msg, "err");
@@ -650,11 +687,15 @@ function shake() {
 function bindUI() {
   $("connect-btn").addEventListener("click", connectBYOP);
   $("disconnect-btn").addEventListener("click", () => {
+    if (state.phase === "running") {
+      state.phase = "setup";
+      clearInterval(state.timer);
+      if (state.ctrl) state.ctrl.abort();
+      $("arena").classList.add("hidden");
+    }
     clearToken();
-    toast(state.keyKind === "oauth" ? "disconnected" : "key cleared", "ok");
+    toast("wallet disconnected", "ok");
   });
-  $("dev-use").addEventListener("click", useDevKey);
-  $("dev-clear").addEventListener("click", () => { clearToken(); $("dev-key").value = ""; toast("key cleared", "ok"); });
 
   $("sound-btn").addEventListener("click", () => {
     state.muted = !state.muted;

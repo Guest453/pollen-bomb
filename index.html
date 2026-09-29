@@ -15,33 +15,41 @@
   <div class="top-right">
     <button id="sound-btn" class="icon-btn" type="button" title="sound on/off">🔊</button>
     <span id="balance" class="pill hidden"></span>
-
-    <div class="auth">
-      <button id="connect-btn" class="btn ghost" type="button">Connect wallet · BYOP</button>
-      <div class="authed hidden" id="authed">
-        <span id="who" class="who">connected</span>
-        <button id="disconnect-btn" class="btn tiny" type="button">disconnect</button>
-      </div>
-
-      <details id="dev-details">
-        <summary>🧪 dev key</summary>
-        <div class="dev-row">
-          <input id="dev-key" type="password" placeholder="sk_… (local testing only)" autocomplete="off" spellcheck="false" />
-          <button id="dev-use" class="btn tiny" type="button">use</button>
-          <button id="dev-clear" class="btn tiny" type="button">clear</button>
-        </div>
-        <p class="warn">secret keys never belong in client code — this is only for testing on your own machine. ship BYOP.</p>
-      </details>
+    <div class="authed hidden" id="authed">
+      <span id="who" class="who">byop · connected</span>
+      <button id="disconnect-btn" class="btn tiny" type="button">disconnect</button>
     </div>
   </div>
 </header>
 
 <main id="shake">
 
-  <!-- ══════════ SETUP ══════════ -->
-  <section id="setup" class="panel">
+  <!-- ══════════ GATE — only shown before BYOP connect ══════════ -->
+  <section id="gate" class="panel gate">
     <h1>the fuse is <em>yours</em>.<br />the code is <em>theirs</em>.</h1>
-    <p class="lede">set a time limit, pick a task, arm the bomb. the ai streams code until the fuse hits&nbsp;zero — if it isn't finished, it dies.</p>
+    <p class="lede">an ai codes against a bomb <strong>you</strong> wind. connect your wallet to reveal the dashboard — nothing is spent until you arm it.</p>
+
+    <button id="connect-btn" class="btn arm" type="button">🔑 CONNECT WALLET · BYOP</button>
+    <p class="hint center">bring your own pollen — the run spends your balance, you stay in control, revoke anytime.</p>
+
+    <details class="how" open>
+      <summary>setup (one time)</summary>
+      <ol>
+        <li>The app ships with an App Key (<code>pk_…</code> — public by design, it can't spend anything on its own).</li>
+        <li>Add this exact <strong>Redirect URI</strong> to that key at <a href="https://enter.pollinations.ai/keys" target="_blank" rel="noopener">enter.pollinations.ai/keys</a>:</li>
+      </ol>
+      <p class="redirect"><code id="redirect-uri"></code> <button id="copy-redirect" class="btn tiny" type="button">copy</button></p>
+      <ol start="3">
+        <li>Hit <strong>connect</strong> → sign in with GitHub → approve <em>usage</em>. OAuth authorization-code + PKCE (S256) hands this tab a temporary scoped <code>sk_</code> (7 days, revocable from your dashboard).</li>
+        <li>The dashboard unlocks: pick task, wind the fuse, arm. 📺</li>
+      </ol>
+      <p class="warn">hosted on GitHub Pages — the redirect above must match exactly, query string aside.</p>
+    </details>
+  </section>
+
+  <!-- ══════════ DASHBOARD — only shown after BYOP connect ══════════ -->
+  <section id="setup" class="panel hidden">
+    <h2 class="dash-title">⚡ you're in. wind the fuse.</h2>
 
     <div class="controls">
       <section class="ctl">
@@ -66,20 +74,15 @@
     </div>
 
     <button id="arm-btn" class="btn arm" type="button">💣 ARM THE BOMB</button>
-    <p class="hint center" id="arm-hint">this runs on <strong>your</strong> pollen — connect a wallet to play.</p>
 
     <details class="how">
-      <summary>how it works / setup</summary>
+      <summary>how the bomb works</summary>
       <ol>
-        <li>Create an <strong>App Key</strong> (<code>pk_…</code>) at <a href="https://enter.pollinations.ai/keys" target="_blank" rel="noopener">enter.pollinations.ai/keys</a> → “Create New App Key”.</li>
-        <li>Add this exact <strong>Redirect URI</strong> on that key:</li>
+        <li>Arm → the model streams code via <code>POST /v1/chat/completions</code>, the fuse burns down.</li>
+        <li>Code finished before zero → <strong>💣 DEFUSED</strong>, time saved.</li>
+        <li>Fuse hits zero → the stream is <code>abort()</code>ed mid-token, the bomb goes off, and the AI is sent <strong>“YOU LOSE…”</strong> — its last words stream into the overlay.</li>
+        <li>☠️ <em>detonate</em> gives up on purpose. Everything runs on your connected wallet only.</li>
       </ol>
-      <p class="redirect"><code id="redirect-uri"></code> <button id="copy-redirect" class="btn tiny" type="button">copy</button></p>
-      <ol start="3">
-        <li>Paste the <code>pk_</code> where? — you don't: hit <strong>Connect wallet</strong>, sign in with GitHub, approve <em>usage</em>, and Pollinations hands this tab a temporary scoped <code>sk_</code> (PKCE, 7&nbsp;days, revocable anytime).</li>
-        <li>Arm the bomb. The AI streams via <code>POST /v1/chat/completions</code>; the moment the fuse dies we <code>AbortController()</code> the stream and send it <strong>“YOU LOSE…”</strong>.</li>
-      </ol>
-      <p class="warn">serve this folder over <code>http://localhost</code> (run <code>node server.js</code>) — OAuth redirects don't work from <code>file://</code>.</p>
     </details>
   </section>
 
@@ -96,6 +99,22 @@
 
     <div class="fuse-track">
       <div class="fuse-fill" id="fuse-fill"><span class="spark"></span></div>
+    </div>
+
+    <div id="thinking" class="thinking hidden" aria-hidden="true">
+      <svg class="bulb" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9.2 18.2h5.6M10 21.2h4"/>
+        <path d="M12 2.8a6.2 6.2 0 0 0-3.6 11.2c.5.4.86 1 1 1.65l.08.5h5.04l.08-.5c.14-.65.5-1.25 1-1.65A6.2 6.2 0 0 0 12 2.8z"/>
+        <path class="ray" d="M12 0.6v1.4"/>
+        <path class="ray" d="M4.4 4.4l1 1"/>
+        <path class="ray" d="M19.6 4.4l-1 1"/>
+        <path class="ray" d="M1.6 12h1.4"/>
+        <path class="ray" d="M21 12h1.4"/>
+      </svg>
+      <div class="think-body">
+        <div class="think-label">Thinking<span class="tdots">...</span></div>
+        <div class="think-text"><span id="think-text"></span></div>
+      </div>
     </div>
 
     <pre class="terminal" id="terminal"><code id="stream"></code></pre>

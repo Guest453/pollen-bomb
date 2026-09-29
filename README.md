@@ -24,12 +24,10 @@ node server.js        # http://localhost:8080
 3. Click **Connect wallet** → sign in with GitHub → approve **usage**.
    The OAuth authorization-code flow with PKCE (S256) runs and the page comes
    back holding a temporary scoped `sk_` (7 days, revocable from the dashboard).
+   **The dashboard only appears after you connect.**
 
 No secrets in the app: the token lives in `sessionStorage` only, never
 `localStorage`, never the URL. 🗝️
-
-**Dev shortcut:** the 🧪 *dev key* box accepts a raw `sk_` for local testing.
-Never deploy a `sk_` — that's what BYOP is for.
 
 ## How the bomb works
 
