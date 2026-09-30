@@ -377,3 +377,32 @@ footer{
 .latecode{border-color:rgba(255,157,47,.5);box-shadow:0 0 40px rgba(255,157,47,.16)}
 .latecode .lw-label{color:var(--orange)}
 .latecode .lw-text:empty::before{content:"still typing…"}
+
+/* ── mcp servers / tools picker ── */
+.mcp-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+.tool-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.mcp-chip{
+  background:#101019;border:1px solid var(--line);color:var(--dim);
+  padding:4px 10px;border-radius:8px;cursor:pointer;font:600 11.5px var(--mono);transition:.14s;
+}
+.mcp-chip:hover{border-color:rgba(255,255,255,.3);color:var(--txt)}
+.mcp-chip.on{
+  color:#dcf4ff;border-color:rgba(101,209,255,.55);background:rgba(101,209,255,.13);
+  box-shadow:0 0 12px rgba(101,209,255,.18);
+}
+.col-head{font:700 11px var(--mono);letter-spacing:1.5px;color:var(--dim);margin:0 0 10px}
+
+/* ── mcp tool activity ── */
+.tool-panel{
+  margin-top:14px;padding:11px 13px;border-radius:12px;
+  border:1px solid rgba(101,209,255,.4);background:rgba(101,209,255,.06);
+}
+.tool-panel.err{border-color:rgba(255,59,59,.55);background:rgba(255,59,59,.07)}
+.tool-head{font:700 10.5px var(--mono);letter-spacing:1.4px;color:#a9e8ff;margin-bottom:7px}
+.tool-panel.err .tool-head{color:#ffb4b4}
+.tool-cmd{font:12.5px/1.5 var(--mono);color:#eaf7ff;white-space:pre-wrap;word-break:break-word}
+.tool-out{
+  margin:9px 0 0;max-height:170px;overflow:auto;
+  font:12px/1.5 var(--mono);color:#9fd8c0;white-space:pre-wrap;word-break:break-word;
+}
+.tool-out:empty::before{content:"running…";color:var(--dim)}

@@ -44,6 +44,8 @@ No secrets in the app: the token lives in `sessionStorage` only, never
 | 💀 agony mode | toggle: on fail it **finishes the code in the background** (streams live into the overlay), then gets the punishment message and must describe its suffering |
 | 🗂 multi-file | toggle: the AI splits output into files via `=== FILE: path ===` → each file gets a tab in the code ui |
 | 🖥 computer mcp | toggle: **chat ui** where it talks (`> ` lines) + **code ui**; it can ask `<<ASK? q \| a \| b >>` → **the bomb FREEZES** until you pick an option or type an answer |
+| 🛠 mcp tools | with the toggle on, the model gets **real tools** (OpenAI tool-calling) bridged to the pollinations-hosted MCP servers: `bash` in a persistent computer (`/mcp/computer`), `runFfmpeg` (`/mcp/ffmpeg`), `web_search_exa` / `web_fetch_exa` (`/mcp/exa`), and pollinations model tools. pick servers/tools in the dashboard — it can literally write files, run and test them. calls stream live into the tool panel and bill your pollen |
+| ⬇ zip | multi-file runs can be downloaded as a `.zip` built in-browser (STORE, no deps) |
 | last words | partial code + the exact `YOU LOSE…` line are sent back → the dying AI replies |
 
 Model catalog is live from `GET /text/models` (no auth needed).

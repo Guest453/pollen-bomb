@@ -89,14 +89,16 @@
         <button id="multi-btn" class="toggle" type="button" role="switch" aria-checked="false" aria-label="multi-file mode"><span class="knob"></span></button>
         <div class="toggle-text">
           <strong>🗂 multi-file</strong>
-          <span>it can write several files at once — each one starts with <code>=== FILE: path ===</code> and gets its own tab in the code ui.</span>
+          <span>it can write several files at once — each one starts with <code>=== FILE: path ===</code>, gets its own tab in the code ui, and the finished set can be <b>downloaded as a .zip</b>.</span>
         </div>
       </div>
       <div class="toggle-row">
-        <button id="mcp-btn" class="toggle" type="button" role="switch" aria-checked="false" aria-label="computer mcp workspace mode"><span class="knob"></span></button>
+        <button id="mcp-btn" class="toggle" type="button" role="switch" aria-checked="false" aria-label="mcp workspace mode"><span class="knob"></span></button>
         <div class="toggle-text">
-          <strong>🖥 computer mcp · workspace</strong>
-          <span>the pollinations computer mcp way: a <b>chat ui</b> where it talks to you — and can <b>ask questions that freeze the bomb</b> until you pick an answer — next to a live <b>code ui</b> of what it's writing.</span>
+          <strong>🖥 mcp workspace · computer mcp</strong>
+          <span>a <b>chat ui</b> where it talks — and can <b>ask questions that freeze the bomb</b> — next to a live <b>code ui</b>. it also gets real <b>mcp tools</b>: run bash in its own persistent computer, write + test files, run ffmpeg, search the web. each call is shown live and billed to your pollen.</span>
+          <div class="mcp-chips" id="mcp-chips" role="group" aria-label="enabled mcp servers"></div>
+          <div class="tool-chips hidden" id="tool-chips" role="group" aria-label="enabled mcp tools"></div>
         </div>
       </div>
     </div>
@@ -110,7 +112,7 @@
         <li>Code finished before zero → <strong>💣 DEFUSED</strong>, time saved.</li>
         <li>Fuse hits zero → the stream is <code>abort()</code>ed mid-token, the bomb goes off, and the AI is sent <strong>“YOU LOSE…”</strong> — its last words stream into the overlay.</li>
         <li>Fuse hits zero with <strong>zero code</strong> (it only thought) → one grace: <strong>⚡ +30s overtime</strong> to actually code.</li>
-        <li>Optional modes above: 💀 agony (background finish + punishment), 🗂 multi-file, 🖥 computer-mcp workspace with freeze-questions.</li>
+        <li>Optional modes above: 💀 agony (background finish + punishment), 🗂 multi-file (+ .zip export), 🖥 mcp workspace — chat ui, freeze-questions, and real mcp tools (computer / ffmpeg / exa / pollinations) it can actually run.</li>
         <li>☠️ <em>detonate</em> gives up on purpose. Everything runs on your connected wallet only.</li>
       </ol>
     </details>
@@ -152,6 +154,8 @@
 
       <!-- code ui: what it's coding -->
       <div class="col-code">
+        <div id="code-head" class="col-head hidden">📟 code ui <span class="chat-sub">what it's coding</span></div>
+
         <div id="thinking" class="thinking hidden" aria-hidden="true">
           <svg class="bulb" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M9.2 18.2h5.6M10 21.2h4"/>
@@ -169,6 +173,12 @@
         </div>
 
         <div id="file-tabs" class="file-tabs hidden"></div>
+
+        <div id="tool-panel" class="tool-panel hidden">
+          <div class="tool-head" id="tool-head">🛠 mcp tool</div>
+          <div class="tool-cmd" id="tool-cmd"></div>
+          <pre class="tool-out" id="tool-out"></pre>
+        </div>
 
         <pre class="terminal" id="terminal"><code id="stream"></code></pre>
       </div>
@@ -196,6 +206,7 @@
     <div class="overlay-actions">
       <button id="again-btn" class="btn" type="button">🔁 run it again</button>
       <button id="copy-btn" class="btn ghost tiny hidden" type="button">copy code</button>
+      <button id="zip-btn" class="btn ghost tiny hidden" type="button">⬇ download .zip</button>
       <button id="new-btn" class="btn ghost" type="button">new task</button>
     </div>
   </div>

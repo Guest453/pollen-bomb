@@ -16,6 +16,7 @@ const SS = { verifier: "pb.verifier", state: "pb.state", token: "pb.token" };
 const LS = {
   stats: "pb.stats", muted: "pb.muted", pk: "pb.pk",
   agony: "pb.agony", multi: "pb.multi", mcp: "pb.mcp",
+  mcpServers: "pb.mcpServers", mcpTools: "pb.mcpTools",
 };
 
 const SYSTEM_PROMPT = [
@@ -35,15 +36,118 @@ const MULTI_PROMPT = [
 ].join("\n");
 
 const MCP_PROMPT = [
-  "WORKSPACE MODE (pollinations computer mcp): you have two channels.",
+  "WORKSPACE MODE (pollinations mcp): you have two channels.",
   "- CODE: raw code only, streaming into the code ui (use === FILE: markers per file when multi-file mode is on).",
   '- CHAT: to talk to the human, start a line with "> " — those lines are pulled out of the code and shown in a chat panel. Keep it short.',
   '- QUESTIONS: when you truly need a decision to continue, emit on ONE single line exactly:  <<ASK? your question? | option one | option two | option three >>',
   "  then END your reply right there — no code after it. The bomb FREEZES until the human answers, then their answer arrives as a human: message and you continue where you stopped.",
   "  2-4 concrete options, ask only when genuinely blocked.",
+  "- TOOLS: you may also call the provided mcp tools. bash runs in YOUR OWN private persistent computer (files survive between runs) — use it to write files, run them and test the code for real. Every tool call costs the human pollen and shows up live in the ui, so keep them purposeful, then keep streaming code.",
 ].join("\n");
 
 const DEATH_LINE = "YOU LOSE. You have died, the bomb has exploded, try faster coding.";
+
+/* ── the pollinations-hosted mcp servers (live catalog:
+      https://gen.pollinations.ai/mcp ) ────────────────────── */
+const MCP_SERVERS = [
+  {
+    id: "computer", name: "🖥 computer", server: "computer", url: `${GEN}/mcp/computer`,
+    desc: "private persistent computer — files + bash shell that survive between runs",
+    tools: [{
+      name: "bash",
+      desc: "run a bash command in your persistent private computer (coreutils, grep, sed, awk, jq, tar, curl, git).",
+      props: {
+        command: { type: "string", description: "the shell command to run" },
+        stdin: { type: "string", description: "optional: fed to the command as stdin (e.g. file content for cat > path)" },
+        cwd: { type: "string", description: "optional working directory (default /workspace)" },
+      },
+      required: ["command"],
+    }],
+  },
+  {
+    id: "ffmpeg", name: "🎬 ffmpeg", server: "ffmpeg", url: `${GEN}/mcp/ffmpeg`,
+    desc: "trim, convert, resize, compress, remix audio and video",
+    tools: [{
+      name: "runFfmpeg",
+      desc: "run native ffmpeg arguments against public HTTPS media; sources are input0, input1, … and it returns a hosted resource link. omit ffmpeg, source urls and the output path.",
+      props: {
+        sources: { type: "array", items: { type: "string" }, description: "public HTTPS media urls, referenced as input0, input1, …" },
+        args: { type: "array", items: { type: "string" }, description: 'ffmpeg arguments, e.g. ["-i","input0","-vf","scale=1280:-2"]' },
+      },
+      required: ["sources", "args"],
+    }],
+  },
+  {
+    id: "exa", name: "🔎 exa search", server: "exa", url: `${GEN}/mcp/exa`,
+    desc: "search the live web, fetch clean page text",
+    tools: [
+      {
+        name: "web_search_exa",
+        desc: "search the live web for current information and return relevant pages with highlights.",
+        props: { query: { type: "string", description: "the search query" } },
+        required: ["query"],
+      },
+      {
+        name: "web_fetch_exa",
+        desc: "read one or more known webpages as clean text.",
+        props: { urls: { type: "array", items: { type: "string" }, description: "page urls to read" } },
+        required: ["urls"],
+      },
+    ],
+  },
+  {
+    id: "pollinations", name: "🌸 pollinations", server: "pollinations", url: `${GEN}/mcp/pollinations`,
+    desc: "pollinations model/api tools — generate text, images, audio; embeddings; balance",
+    tools: [
+      {
+        name: "generateText",
+        desc: "generate text with a pollinations text model (text, search, multimodal input, tool calling).",
+        props: {
+          prompt: { type: "string", description: "the prompt" },
+          model: { type: "string", description: "optional model id" },
+        },
+        required: ["prompt"],
+      },
+      {
+        name: "generateImage",
+        desc: "generate or edit an image with a pollinations image model.",
+        props: {
+          prompt: { type: "string", description: "image prompt" },
+          size: { type: "string", description: "optional size, e.g. 1024x1024" },
+        },
+        required: ["prompt"],
+      },
+      { name: "generateAudio", desc: "generate speech, music or sound.", props: { text: { type: "string", description: "text to speak" } }, required: ["text"] },
+      { name: "generateVideo", desc: "generate video.", props: { prompt: { type: "string", description: "video prompt" } }, required: ["prompt"] },
+      { name: "getBalance", desc: "remaining Pollen for the authenticated key (requires account:usage).", props: {}, required: [] },
+    ],
+  },
+  {
+    id: "ask-jev", name: "🎲 ask jev", server: "ask-jev", url: `${GEN}/mcp/ask-jev`,
+    desc: "typed choice / score / probability decision tools",
+    tools: [
+      {
+        name: "jev_decide",
+        desc: "evaluate state with typed decision questions (choice / ordered score / probability). supply the relevant facts in state and the questions array.",
+        props: {
+          state: { type: "object", description: "relevant facts as a JSON object" },
+          questions: { type: "array", items: { type: "object" }, description: "the decision questions" },
+        },
+        required: ["state", "questions"],
+      },
+    ],
+  },
+  {
+    id: "composio", name: "🔌 connected apps", server: "composio", url: `${GEN}/mcp/composio`,
+    desc: "gmail / github / sheets / slack — the user's own connected accounts",
+    tools: [],
+  },
+];
+
+function defaultServers() {
+  const s = state.mcpServers;
+  return s && s.length ? s : ["computer"];
+}
 
 const TASKS = [
   { id: "palindrome", label: "palindrome",
@@ -148,10 +252,16 @@ const state = {
   task: TASKS[0],
   fuse: 30,
   customFuse: false,
+  phaseLabel: "",
   // modes
   agony: localStorage.getItem(LS.agony) === "1",
   multi: localStorage.getItem(LS.multi) === "1",
   mcp: localStorage.getItem(LS.mcp) === "1",
+  mcpServers: null,
+  mcpTools: null,
+  toolRound: 0,
+  toolMsgs: [],
+  toolResultCache: null,
   // this run's stream
   raw: "",                  // verbatim content (markers stripped on ask)
   segs: [""],               // assistant segments, split at each question
@@ -186,9 +296,17 @@ const state = {
   // agony background finish
   background: false,
   watchdog: null,
+  // mcp
+  mcpBusy: false,
+  mcpErrored: false,
   muted: localStorage.getItem(LS.muted) === "1",
   stats: loadStats(),
 };
+
+try { state.mcpServers = JSON.parse(localStorage.getItem(LS.mcpServers) || "null"); } catch { /* ignore */ }
+try { state.mcpTools = JSON.parse(localStorage.getItem(LS.mcpTools) || "null"); } catch { /* ignore */ }
+if (!Array.isArray(state.mcpServers)) state.mcpServers = null;
+if (state.mcpTools && typeof state.mcpTools !== "object") state.mcpTools = null;
 
 function loadStats() {
   try { return JSON.parse(localStorage.getItem(LS.stats)) || { won: 0, lost: 0, best: null }; }
@@ -417,6 +535,68 @@ function currentPrompt() {
   return state.task.prompt;
 }
 
+/* ── mcp server / tool picker ─────────────────────────────── */
+function serverEnabled(id) { return defaultServers().includes(id); }
+function toolEnabled(serverId, toolName) {
+  if (state.mcpTools == null) return serverEnabled(serverId);
+  return Array.isArray(state.mcpTools[serverId]) && state.mcpTools[serverId].includes(toolName);
+}
+function saveMcpPrefs() {
+  localStorage.setItem(LS.mcpServers, JSON.stringify(state.mcpServers || []));
+  if (state.mcpTools) localStorage.setItem(LS.mcpTools, JSON.stringify(state.mcpTools));
+}
+
+function renderMcpPicker() {
+  const wrap = $("mcp-chips");
+  wrap.innerHTML = "";
+  for (const s of MCP_SERVERS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.title = s.desc;
+    b.className = "mcp-chip" + (serverEnabled(s.id) ? " on" : "");
+    b.textContent = s.name;
+    b.addEventListener("click", () => {
+      const cur = defaultServers().slice();
+      const i = cur.indexOf(s.id);
+      if (i >= 0) cur.splice(i, 1); else cur.push(s.id);
+      state.mcpServers = cur;
+      if (state.mcpTools && !s.tools.length) { /* nothing */ }
+      saveMcpPrefs();
+      renderMcpPicker();
+    });
+    wrap.appendChild(b);
+  }
+
+  // per-tool chips only when a server is on and has tools
+  const tw = $("tool-chips");
+  tw.innerHTML = "";
+  let any = false;
+  for (const s of MCP_SERVERS) {
+    if (!serverEnabled(s.id) || !s.tools.length) continue;
+    any = true;
+    for (const t of s.tools) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.title = `${s.id} · ${t.desc}`;
+      b.className = "mcp-chip" + (toolEnabled(s.id, t.name) ? " on" : "");
+      b.textContent = `${s.id}:${t.name}`;
+      b.addEventListener("click", () => {
+        const list = Array.isArray(state.mcpTools && state.mcpTools[s.id])
+          ? state.mcpTools[s.id].slice()
+          : s.tools.map((x) => x.name);
+        const i = list.indexOf(t.name);
+        if (i >= 0) list.splice(i, 1); else list.push(t.name);
+        state.mcpTools = state.mcpTools || {};
+        state.mcpTools[s.id] = list;
+        saveMcpPrefs();
+        renderMcpPicker();
+      });
+      tw.appendChild(b);
+    }
+  }
+  tw.classList.toggle("hidden", !any);
+}
+
 /* ── per-run prompt + message history (rebuilt on every ask) ── */
 function systemPrompt() {
   const p = [SYSTEM_PROMPT];
@@ -437,6 +617,8 @@ function buildMessages() {
     if (i < state.answers.length && state.answers[i])
       m.push({ role: "user", content: `human: you asked "${state.questions[i]}" and I answered: "${state.answers[i]}". Pick up exactly where you stopped.` });
   });
+  // mcp tool round-trips (only the last N to stay in budget)
+  if (state.toolMsgs.length) m.push(...state.toolMsgs.slice(-60));
   return m;
 }
 
@@ -541,6 +723,7 @@ function renderRunUI(final) {
   $("stream").textContent = (der.files[state.activeFile] || der.files[0]).content;
 
   // chat ui (workspace mode)
+  $("code-head").classList.toggle("hidden", !state.mcp);
   if (state.mcp) {
     $("chat-panel").classList.remove("hidden");
     $("arena-grid").classList.add("split");
@@ -585,22 +768,115 @@ function exportCode() {
   return state.codeText;
 }
 
+/* ══════════════════ ZIP (multi-file download, zero deps) ══════════════════ */
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function sanitizeZipPath(p) {
+  p = String(p || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^[A-Za-z]:/, "");
+  const parts = [];
+  for (const seg of p.split("/")) {
+    if (!seg || seg === "." || seg === "..") continue;
+    parts.push(seg.replace(/[:*?"<>|]/g, "_"));
+  }
+  return parts.join("/") || "file.txt";
+}
+
+/* build a real .zip (STORE, no compression) from the parsed files */
+function buildZip(files) {
+  const enc = new TextEncoder();
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+
+  const u16 = (a, v) => { a.push(v & 0xff, (v >>> 8) & 0xff); };
+  const u32 = (a, v) => { a.push(v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff); };
+
+  for (const f of files) {
+    const name = enc.encode(sanitizeZipPath(f.path));
+    const data = enc.encode(f.content || "");
+    const crc = crc32(data);
+
+    const lh = [];
+    u32(lh, 0x04034b50); u16(lh, 20); u16(lh, 0x0800); u16(lh, 0); u16(lh, 0); u16(lh, 0);
+    u32(lh, crc); u32(lh, data.length); u32(lh, data.length);
+    u16(lh, name.length); u16(lh, 0);
+    const lhb = new Uint8Array(lh);
+
+    chunks.push(lhb, name, data);
+
+    const ch = [];
+    u32(ch, 0x02014b50); u16(ch, 20); u16(ch, 20); u16(ch, 0x0800); u16(ch, 0); u16(ch, 0); u16(ch, 0);
+    u32(ch, crc); u32(ch, data.length); u32(ch, data.length);
+    u16(ch, name.length); u16(ch, 0); u16(ch, 0); u16(ch, 0); u16(ch, 0); u32(ch, 0);
+    u32(ch, offset);
+    const chb = new Uint8Array(ch);
+    central.push(chb, name);
+
+    offset += lhb.length + name.length + data.length;
+  }
+
+  const centralSize = central.reduce((n, p) => n + p.length, 0);
+  const end = [];
+  u32(end, 0x06054b50); u16(end, 0); u16(end, 0);
+  u16(end, files.length); u16(end, files.length);
+  u32(end, centralSize); u32(end, offset); u16(end, 0);
+
+  const all = [...chunks, ...central, new Uint8Array(end)];
+  const total = all.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let p = 0;
+  for (const c of all) { out.set(c, p); p += c.length; }
+  return new Blob([out], { type: "application/zip" });
+}
+
+function downloadZip() {
+  const files = (state.files || []).filter((f) => f && f.content);
+  if (!files.length) { toast("nothing to zip yet", "err"); return; }
+  const slug = (state.task.id === "custom" ? "pollen-bomb" : state.task.id) + "-" + Date.now();
+  const url = URL.createObjectURL(buildZip(files));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${slug}.zip`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  toast(`⬇ downloading ${files.length} file${files.length > 1 ? "s" : ""} as .zip`, "ok");
+}
+
 /* ══════════════════ STREAMING ══════════════════ */
+function newToolAcc() {
+  return { content: "", reasoning: "", toolCalls: [] };
+}
+
 async function streamChat(messages, opts = {}) {
-  const { signal, onDelta, onReasoning, onDone, onError } = opts;
+  const { signal, tools, onDelta, onReasoning, onDone, onError } = opts;
+  const acc = newToolAcc();
 
   let res;
   try {
     res = await fetch(`${GEN}/v1/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.token}` },
-      body: JSON.stringify({ model: state.model, messages, stream: true }),
+      body: JSON.stringify({ model: state.model, messages, stream: true, ...(tools && tools.length ? { tools } : {}) }),
       signal,
     });
   } catch (e) {
-    if (e && e.name === "AbortError") return;
+    if (e && e.name === "AbortError") return null;
     onError && onError("network error: " + ((e && e.message) || e));
-    return;
+    return null;
   }
 
   if (!res.ok) {
@@ -613,7 +889,7 @@ async function streamChat(messages, opts = {}) {
     else if (res.status === 402) onError && onError("out of pollen (402) — top up at enter.pollinations.ai", 402);
     else if (res.status === 400 && /content_blocked|blocked/i.test(msg)) onError && onError("safety filter blocked the task: " + msg, 400);
     else onError && onError(msg, res.status);
-    return;
+    return null;
   }
 
   const reader = res.body.getReader();
@@ -638,66 +914,237 @@ async function streamChat(messages, opts = {}) {
         if (j.error) throw new Error(j.error.message || "stream error");
         const d = j.choices && j.choices[0] ? j.choices[0].delta : null;
         if (d) {
-          if (d.content) onDelta && onDelta(d.content);
+          if (d.content) { acc.content += d.content; onDelta && onDelta(d.content); }
           const think = d.reasoning_content != null
             ? d.reasoning_content
             : (typeof d.reasoning === "string" ? d.reasoning : null);
-          if (think) onReasoning && onReasoning(think);
+          if (think) { acc.reasoning += think; onReasoning && onReasoning(think); }
+          if (Array.isArray(d.tool_calls)) {
+            for (const tc of d.tool_calls) {
+              const idx = tc.index || 0;
+              acc.toolCalls[idx] = acc.toolCalls[idx] || { id: "", type: "function", function: { name: "", arguments: "" } };
+              if (tc.id) acc.toolCalls[idx].id = tc.id;
+              if (tc.function) {
+                if (tc.function.name) acc.toolCalls[idx].function.name += tc.function.name;
+                if (tc.function.arguments) acc.toolCalls[idx].function.arguments += tc.function.arguments;
+              }
+            }
+          }
         }
       }
       if (sawDone) break;
     }
   } catch (e) {
-    if (e && e.name === "AbortError") return;
+    if (e && e.name === "AbortError") return null;
     onError && onError((e && e.message) || String(e));
-    return;
+    return null;
   }
-  onDone && onDone();
+  acc.toolCalls = acc.toolCalls.filter(Boolean);
+  onDone && onDone(acc);
+  return acc;
+}
+
+/* ══════════════════ MCP TOOLS (real bridge to the hosted servers) ══════════════════ */
+function enabledTools() {
+  const defs = [];
+  for (const s of MCP_SERVERS) {
+    if (s.id === "composio") continue;
+    if (!serverEnabled(s.id)) continue;
+    for (const t of s.tools) {
+      if (!toolEnabled(s.id, t.name)) continue;
+      defs.push({
+        type: "function",
+        function: { name: t.name, description: `[${s.server}] ${t.desc}`, parameters: { type: "object", properties: t.props, required: t.required } },
+        meta: s,
+      });
+    }
+  }
+  return defs;
+}
+function toolDefByName(name) {
+  return enabledTools().find((d) => d.function.name === name);
+}
+function trimToolError(msg) {
+  msg = String(msg || "tool error").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return msg.length > 220 ? msg.slice(0, 220) + "…" : msg;
+}
+
+function renderToolBlock(cmd, phaseLabel) {
+  $("tool-panel").classList.remove("hidden", "err");
+  $("tool-head").textContent = `🛠 ${phaseLabel}`;
+  $("tool-cmd").textContent = cmd;
+  $("tool-out").textContent = "";
+}
+function renderToolOutput(text, err) {
+  const out = $("tool-out");
+  if (err) $("tool-panel").classList.add("err");
+  else $("tool-panel").classList.remove("err");
+  const t = String(text || "");
+  out.textContent = t.length > 4000 ? t.slice(0, 2500) + "\n…\n" + t.slice(-1200) : t;
+  out.scrollTop = out.scrollHeight;
+}
+function setMcpBusy(v) {
+  state.mcpBusy = v;
+  const el = $("frozen");
+  if (v) { el.textContent = "🛠 MCP TOOL RUNNING"; el.classList.remove("hidden"); }
+  else if (!state.ask) el.classList.add("hidden");
+}
+function finishMcp() {
+  setMcpBusy(false);
+  if (!state.mcpErrored) $("tool-panel").classList.add("hidden");
+  $("frozen").textContent = "⏸ FROZEN · answer the AI to resume";
+}
+
+/* one JSON-RPC round against a hosted mcp server */
+async function mcpCall(server, name, args) {
+  const res = await fetch(server.url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+      "Authorization": `Bearer ${state.token}`,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+  });
+  if (!res.ok) throw new Error(trimToolError(`HTTP ${res.status} ${await res.text().catch(() => "")}`));
+  const ct = res.headers.get("content-type") || "";
+  let payload = "";
+  if (ct.includes("text/event-stream")) {
+    const text = await res.text();
+    for (const line of text.split("\n")) {
+      const l = line.trim();
+      if (l.startsWith("data:")) payload += l.slice(5).trim();
+    }
+  } else {
+    payload = await res.text();
+  }
+  let j;
+  try { j = JSON.parse(payload); } catch { throw new Error(trimToolError("unreadable mcp response")); }
+  if (j.error) throw new Error(trimToolError(j.error.message || JSON.stringify(j.error)));
+  const r = j.result || {};
+  const text = Array.isArray(r.content)
+    ? r.content.map((c) => (typeof c.text === "string" ? c.text : c.type ? `[${c.type}]` : JSON.stringify(c))).join("\n")
+    : (typeof r === "string" ? r : JSON.stringify(r));
+  return { text, isError: !!r.isError };
+}
+
+/* runs every tool call of one assistant turn, sequentially, live in the ui */
+async function runTools(calls) {
+  const { results, cached } = resolveToolResults(calls);
+  let i = 0;
+  for (const c of calls) {
+    const r = results[i++];
+    if (cached[i - 1]) { toast(`♻️ reused cached result for ${c.function.name} (costing 0)`, "ok"); continue; }
+    const def = toolDefByName(c.function.name);
+    if (!def) { r.content = `error: tool ${c.function.name} is not enabled`; continue; }
+    toast(`🛠 calling ${c.function.name} on the ${def.meta.server} mcp — billed to your pollen`, "ok");
+    setMcpBusy(true);
+    renderToolBlock(c.function.name + "(" + JSON.stringify(r.args) + ")", `${def.meta.server} mcp · ${c.function.name}`);
+    try {
+      const out = await mcpCall(def.meta, c.function.name, r.args);
+      r.content = out.text;
+      renderToolOutput(out.text, out.isError);
+      if (out.isError) state.mcpErrored = true;
+    } catch (e) {
+      r.content = "error: " + trimToolError(e.message || e);
+      renderToolOutput(r.content, true);
+      state.mcpErrored = true;
+    }
+    state.toolResultCache[`${c.function.name}|${r.argsJson}`] = r.content.slice(0, 6000);
+    saveToolCache();
+    setMcpBusy(false);
+    await sleep(400);      // let the human watch the tool fire
+  }
+  return results;
+}
+function resolveToolResults(calls) {
+  const results = [];
+  const cachedFlags = [];
+  for (const c of calls) {
+    let args = {};
+    try { args = c.function.arguments ? JSON.parse(c.function.arguments) : {}; } catch { args = {}; }
+    const json = JSON.stringify(args);
+    const key = `${c.function.name}|${json}`;
+    const hit = state.toolResultCache ? state.toolResultCache[key] : null;
+    results.push({ role: "tool", tool_call_id: c.id || `call_${Math.random().toString(36).slice(2)}`, content: "", args, argsJson: json });
+    cachedFlags.push(!!hit);
+    if (hit) results[results.length - 1].content = hit;
+  }
+  return { results, cached: cachedFlags };
+}
+function saveToolCache() {
+  try {
+    const entries = Object.entries(state.toolResultCache || {});
+    if (entries.length > 40) state.toolResultCache = Object.fromEntries(entries.slice(-40));
+    localStorage.setItem(LS.mcpTools + ".cache", JSON.stringify(state.toolResultCache));
+  } catch { /* ignore */ }
 }
 
 /* one entrypoint for the run stream — first arm AND every post-question resume */
-function streamRun() {
+async function streamRun() {
   const runId = state.runId;
   const alive = () => runId === state.runId;
 
-  streamChat(buildMessages(), {
-    signal: state.ctrl.signal,
-    onReasoning: (r) => { if (alive()) feedThinking(r); },
-    onDelta: (d) => {
-      if (!alive()) return;
-      state.segs[state.segs.length - 1] += d;
-      state.raw += d;
-      if (state.background) {
-        // agony mode: swallow the stream into the late-code box
+  while (true) {
+    const useTools = state.mcp && !state.paused;
+    const res = await streamChat(buildMessages(), {
+      signal: state.ctrl.signal,
+      tools: useTools ? enabledTools() : undefined,
+      onReasoning: (r) => { if (alive()) feedThinking(r); },
+      onDelta: (d) => {
+        if (!alive()) return;
+        state.segs[state.segs.length - 1] += d;
+        state.raw += d;
+        if (state.background) {
+          // agony mode: swallow the stream into the late-code box
+          renderRunUI(false);
+          const lc = $("latecode");
+          lc.textContent = state.codeText;
+          lc.scrollTop = lc.scrollHeight;
+          return;
+        }
+        if (state.phase !== "running") return;
+        stopThinking();                     // code started → the thought is over
         renderRunUI(false);
-        const lc = $("latecode");
-        lc.textContent = state.codeText;
-        lc.scrollTop = lc.scrollHeight;
-        return;
-      }
-      if (state.phase !== "running") return;
-      stopThinking();                     // code started → the thought is over
-      renderRunUI(false);
-      detectAsk();
-    },
-    onDone: () => {
-      if (!alive()) return;
-      if (state.phase !== "running") {
-        if (state.background) finishBackground();
-        return;
-      }
-      renderRunUI(true);
-      if (state.ask) return;              // asked at the last byte — frozen, waiting
-      win();
-    },
-    onError: (msg, status) => {
-      if (!alive()) return;
-      if (state.background) { finishBackground(); return; }
-      if (state.phase !== "running") return;
-      if (status === 401) clearToken();
-      failRun(msg);
-    },
-  });
+        detectAsk();
+      },
+      onDone: () => {
+        if (!alive()) return;
+        if (state.phase !== "running") {
+          if (state.background) finishBackground();
+          return;
+        }
+        if (state.ask) return;              // asked at the last byte — frozen, waiting
+        renderRunUI(true);
+        win();
+      },
+      onError: (msg, status) => {
+        if (!alive()) return;
+        if (state.background) { finishBackground(); return; }
+        if (state.phase !== "running") return;
+        if (status === 401) clearToken();
+        failRun(msg);
+      },
+    });
+
+    if (!res) return;
+    if (!alive()) return;
+    if (!res.toolCalls.length) return;
+    if (state.phase !== "running" && !state.background) return;
+    if (state.ask) return;                // frozen on a question — drop the tool round
+
+    state.segs[state.segs.length - 1] +=
+      "\n" + res.toolCalls.map((tc) => `[tool call: ${tc.function.name}(${tc.function.arguments})]`).join("\n") + "\n";
+    const segText = res.content.trim();
+    const msg = { role: "assistant", content: res.content || null, tool_calls: res.toolCalls };
+    state.toolMsgs.push(msg);
+    state.toolMsgs.push(...await runTools(res.toolCalls).then((rows) =>
+      rows.map((r) => ({ role: "tool", tool_call_id: r.tool_call_id, content: r.content }))));
+    if (!segText) renderRunUI(false);
+    await sleep(350);
+    if (!alive()) return;
+    if (state.phase !== "running" && !state.background) return;
+  }
 }
 
 /* ══════════════════ QUESTIONS (bomb freezes) ══════════════════ */
@@ -722,7 +1169,7 @@ function presentAsk(q, options) {
   renderRunUI(true);
   pushLog("ai", "⏸ asked: " + q);
 
-  $("frozen").classList.remove("hidden");
+  if (!state.mcpBusy) $("frozen").classList.remove("hidden");
   $("timer").classList.add("frozen");
   $("ask-q").textContent = q;
   const opts = $("ask-opts");
@@ -768,6 +1215,7 @@ function clearAskUI() {
   $("ask-card").classList.add("hidden");
   $("frozen").classList.add("hidden");
   $("timer").classList.remove("frozen");
+  setMcpBusy(false);
 }
 
 /* ══════════════════ THE GAME ══════════════════ */
@@ -798,11 +1246,16 @@ function arm() {
   state.lastFileCount = 0;
   state.markersSeen = false;
   state.lastAi = [];
+  state.toolRound = 0;
+  state.toolMsgs = [];
+  try { state.toolResultCache = JSON.parse(localStorage.getItem(LS.mcpTools + ".cache") || "{}"); } catch { state.toolResultCache = {}; }
+  state.mcpErrored = false;
   resetThinking();
   $("stream").textContent = "";          // empty the code part on every new task
   $("chat-log").textContent = "";
   $("file-tabs").textContent = "";
   $("file-tabs").classList.add("hidden");
+  $("tool-panel").classList.add("hidden");
   state.overtime = false;
   $("overtime").classList.add("hidden");
   state.windowMs = state.fuse * 1000;
@@ -873,6 +1326,7 @@ function win() {
   state.phase = "won";
   clearInterval(state.timer);
   stopThinking();
+  finishMcp();
   const left = Math.max(0, state.deadline - performance.now());
   state.used = (performance.now() - state.runStart) / 1000;
   state.stats.won++;
@@ -933,7 +1387,9 @@ function showResult({ won, left }) {
   $("result-meta").textContent = won
     ? `${usedLabel(state.used)} of ${fuseLabel(state.fuse)} used${state.overtime ? " · ⚡ saved by +30s overtime" : ""} · ${state.model} · ${taskLabel}`
     : `${fuseLabel(state.fuse)} fuse${state.overtime ? " +30s overtime" : ""} · detonated at 00:00.0 · ${state.model} · ${taskLabel}`;
+  const files = (state.files || []).filter((f) => f && f.content);
   $("copy-btn").classList.toggle("hidden", !state.codeText);
+  $("zip-btn").classList.toggle("hidden", !(state.multi && state.markersSeen && files.length > 1));
   $("lastwords-box").classList.add("hidden");
   if (!won) $("lastwords").textContent = "";
 }
@@ -1086,6 +1542,7 @@ function bindToggle(id, key, label) {
     state[key] = !state[key];
     localStorage.setItem(LS[key], state[key] ? "1" : "0");
     paint();
+    if (key === "mcp") renderMcpPicker();
     if (key === "mcp" || key === "multi") renderRunUI(state.phase === "running" ? false : true);
     toast(`${label} ${state[key] ? "ON" : "OFF"}`, "ok");
   });
@@ -1121,6 +1578,7 @@ function bindUI() {
     try { await navigator.clipboard.writeText(exportCode()); toast("code copied", "ok"); }
     catch { toast("clipboard blocked by the browser", "err"); }
   });
+  $("zip-btn").addEventListener("click", downloadZip);
 
   // custom fuse: hours / minutes / seconds
   const fuseFields = [$("fuse-h"), $("fuse-m"), $("fuse-s")];
@@ -1140,7 +1598,7 @@ function bindUI() {
   // mode toggles
   bindToggle("agony-btn", "agony", "💀 agony mode");
   bindToggle("multi-btn", "multi", "🗂 multi-file");
-  bindToggle("mcp-btn", "mcp", "🖥 computer mcp workspace");
+  bindToggle("mcp-btn", "mcp", "🖥 mcp workspace");
 
   // question card
   const sendAsk = () => {
@@ -1164,6 +1622,7 @@ function init() {
   renderStats();
   renderTasks();
   renderFuses();
+  renderMcpPicker();
   bindUI();
   loadModels();
   $("redirect-uri").textContent = redirectURI();
