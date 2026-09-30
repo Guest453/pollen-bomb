@@ -299,6 +299,9 @@ const state = {
   // mcp
   mcpBusy: false,
   mcpErrored: false,
+  toolsUnsupported: false,
+  retryNoTools: false,
+  turn: "",
   muted: localStorage.getItem(LS.muted) === "1",
   stats: loadStats(),
 };
@@ -606,6 +609,13 @@ function systemPrompt() {
 }
 function clipSeg(s) {
   return s.length > 9000 ? s.slice(0, 3500) + "\n...[cut]...\n" + s.slice(-5500) : s;
+}
+/* the current turn's text isn't part of the history until the turn really ends */
+function foldTurn() {
+  if (state.turn) {
+    state.segs[state.segs.length - 1] += state.turn;
+    state.turn = "";
+  }
 }
 function buildMessages() {
   const m = [
@@ -964,6 +974,10 @@ function enabledTools() {
 function toolDefByName(name) {
   return enabledTools().find((d) => d.function.name === name);
 }
+/* what actually goes on the wire — the internal `meta` stays home */
+function apiTools() {
+  return enabledTools().map((d) => ({ type: d.type, function: d.function }));
+}
 function trimToolError(msg) {
   msg = String(msg || "tool error").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
   return msg.length > 220 ? msg.slice(0, 220) + "…" : msg;
@@ -1086,14 +1100,15 @@ async function streamRun() {
   const alive = () => runId === state.runId;
 
   while (true) {
-    const useTools = state.mcp && !state.paused;
+    state.turn = "";
+    const useTools = state.mcp && !state.paused && !state.toolsUnsupported && enabledTools().length > 0;
     const res = await streamChat(buildMessages(), {
       signal: state.ctrl.signal,
-      tools: useTools ? enabledTools() : undefined,
+      tools: useTools ? apiTools() : undefined,
       onReasoning: (r) => { if (alive()) feedThinking(r); },
       onDelta: (d) => {
         if (!alive()) return;
-        state.segs[state.segs.length - 1] += d;
+        state.turn += d;
         state.raw += d;
         if (state.background) {
           // agony mode: swallow the stream into the late-code box
@@ -1108,42 +1123,59 @@ async function streamRun() {
         renderRunUI(false);
         detectAsk();
       },
-      onDone: () => {
-        if (!alive()) return;
-        if (state.phase !== "running") {
-          if (state.background) finishBackground();
-          return;
-        }
-        if (state.ask) return;              // asked at the last byte — frozen, waiting
-        renderRunUI(true);
-        win();
-      },
       onError: (msg, status) => {
         if (!alive()) return;
         if (state.background) { finishBackground(); return; }
         if (state.phase !== "running") return;
+        if (useTools && status === 400 && /tool|function|schema|unsupported|not supported/i.test(msg)) {
+          // the model refuses mcp tools → retry the same round without them
+          state.toolsUnsupported = true;
+          state.retryNoTools = true;
+          toast("⚠️ model refuses mcp tools — retrying the round without them (pick a tool-capable model next time)", "err");
+          return;
+        }
         if (status === 401) clearToken();
         failRun(msg);
       },
     });
 
-    if (!res) return;
+    if (!res) {
+      if (!alive()) return;
+      if (state.retryNoTools) { state.retryNoTools = false; continue; }
+      return;
+    }
     if (!alive()) return;
-    if (!res.toolCalls.length) return;
-    if (state.phase !== "running" && !state.background) return;
-    if (state.ask) return;                // frozen on a question — drop the tool round
 
-    state.segs[state.segs.length - 1] +=
-      "\n" + res.toolCalls.map((tc) => `[tool call: ${tc.function.name}(${tc.function.arguments})]`).join("\n") + "\n";
-    const segText = res.content.trim();
-    const msg = { role: "assistant", content: res.content || null, tool_calls: res.toolCalls };
-    state.toolMsgs.push(msg);
-    state.toolMsgs.push(...await runTools(res.toolCalls).then((rows) =>
-      rows.map((r) => ({ role: "tool", tool_call_id: r.tool_call_id, content: r.content }))));
-    if (!segText) renderRunUI(false);
-    await sleep(350);
-    if (!alive()) return;
-    if (state.phase !== "running" && !state.background) return;
+    // tool calls ended the turn? the round is NOT over — run them and stream on
+    if (res.toolCalls.length) {
+      if (state.phase !== "running" && !state.background) return;
+      if (state.ask) return;                // frozen on a question — drop the tool round
+      state.toolRound++;
+      if (state.toolRound > 8) {
+        state.toolsUnsupported = true;
+        toast("🛑 tool budget hit (8 rounds) — finishing without mcp tools", "err");
+      }
+      state.toolMsgs.push({ role: "assistant", content: state.turn || null, tool_calls: res.toolCalls });
+      const rows = await runTools(res.toolCalls);
+      state.toolMsgs.push(...rows.map((r) => ({ role: "tool", tool_call_id: r.tool_call_id, content: r.content })));
+      state.turn = "";
+      renderRunUI(false);
+      await sleep(350);
+      continue;
+    }
+
+    // plain completion → that's the run
+    if (state.phase === "running" && !state.turn.trim()) {
+      // no code, no tools, no nothing — a broken round, not a defuse
+      failRun("the model returned an empty completion — try another model (or turn the mcp tools off)");
+      return;
+    }
+    foldTurn();
+    if (state.phase !== "running") return;
+    if (state.ask) { renderRunUI(true); return; }
+    renderRunUI(true);
+    win();
+    return;
   }
 }
 
@@ -1164,6 +1196,7 @@ function presentAsk(q, options) {
   state.questions.push(q);
   state.paused = true;
   state.pauseAt = performance.now();
+  foldTurn();
   stopThinking();
   try { state.ctrl && state.ctrl.abort(); } catch { /* ignore */ }
   renderRunUI(true);
@@ -1250,6 +1283,9 @@ function arm() {
   state.toolMsgs = [];
   try { state.toolResultCache = JSON.parse(localStorage.getItem(LS.mcpTools + ".cache") || "{}"); } catch { state.toolResultCache = {}; }
   state.mcpErrored = false;
+  state.toolsUnsupported = false;
+  state.retryNoTools = false;
+  state.turn = "";
   resetThinking();
   $("stream").textContent = "";          // empty the code part on every new task
   $("chat-log").textContent = "";
@@ -1422,6 +1458,7 @@ function finishBackground() {
   if (!state.background) return;
   state.background = false;
   clearTimeout(state.watchdog);
+  foldTurn();
   try { state.ctrl && state.ctrl.abort(); } catch { /* ignore */ }
   renderRunUI(true);
   $("latecode").textContent = state.codeText;
